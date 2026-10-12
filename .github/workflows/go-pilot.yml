@@ -1,0 +1,19 @@
+name: Go pilot example
+on:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - run: python3 -m unittest discover -s tests -p test_template.py
+      - run: bash examples/go-pilot/scripts/validate.sh
