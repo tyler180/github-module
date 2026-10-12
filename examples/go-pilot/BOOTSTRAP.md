@@ -1,6 +1,8 @@
 # Bootstrap a Go repository
 
-From the github-module checkout, generate into a new destination:
+First create the repository using the [Terraform example](README.md#create-the-repository),
+or the github-infra deployment workflow. Then, from the github-module checkout,
+generate into a new destination:
 
 ```sh
 python3 scripts/render-template.py \
@@ -34,3 +36,23 @@ After publishing the bootstrap PR, verify a successful run and a deliberately
 failing test/formatting change. Observe the actual aggregate check name before
 using it for branch protection. Local tests and the example's CI do not prove
 live enforcement on the newly provisioned repository.
+
+Clone the newly created repository, create a bootstrap branch, and copy the
+generated starter into it (including hidden files, excluding Terraform state):
+
+```sh
+git clone https://github.com/YOUR_GITHUB_OWNER/github-go-pilot.git /tmp/go-pilot-checkout
+cd /tmp/go-pilot-checkout
+git switch -c bootstrap-go
+cp -R /tmp/github-go-pilot/. .
+bash scripts/validate.sh
+git add .
+git commit -m "Bootstrap Go pilot"
+git push -u origin bootstrap-go
+gh pr create --title "Bootstrap Go pilot" --body "Add the Go starter and shared CI."
+```
+
+Use your actual owner and repository name in both the renderer's `--go-module`
+and clone URL. The renderer deliberately excludes the Terraform provisioning
+folder from the generated application starter. Review and merge the bootstrap
+PR after CI succeeds.

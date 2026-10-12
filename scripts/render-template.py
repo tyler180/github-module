@@ -49,13 +49,17 @@ def main():
         pilot = root / "examples" / "go-pilot"
         for path in pilot.rglob("*"):
             relative = path.relative_to(pilot)
-            if not path.is_file() or path.name.endswith(".in") or any(part in (".git", "__pycache__", ".terraform") for part in relative.parts):
+            if not path.is_file() or path.name.endswith(".in") or any(part in (".git", "__pycache__", ".terraform", "terraform") for part in relative.parts):
                 continue
             if str(relative) in (".github/workflows/ci.yml", ".pre-commit-config.yaml", ".github/CODEOWNERS"):
                 continue
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             content = path.read_text()
+            if str(relative) == "README.md":
+                start = content.index("## Create the repository")
+                end = content.index("## Run the Go starter")
+                content = content[:start] + "Repository provisioning is complete before this starter is added. See BOOTSTRAP.md for source bootstrap instructions.\n\n" + content[end:]
             if str(relative) == "go.mod":
                 content = "module " + args.go_module + "\n\ngo " + ".".join(args.go_version.split(".")[:2]) + ".0\n"
             target.write_text(content)

@@ -43,6 +43,7 @@ class TemplateTests(unittest.TestCase):
         for name in ("main.go", "main_test.go", "scripts/validate.sh", "Makefile", "BOOTSTRAP.md"):
             self.assertTrue((self.destination / name).is_file(), name)
         self.assertTrue((self.destination / "scripts/validate.sh").stat().st_mode & 0o111)
+        self.assertFalse((self.destination / "terraform").exists())
         self.assertEqual((self.destination / ".github/CODEOWNERS").read_text(), "* @fixture-owner/platform\n")
         self.assertFalse(any(p.name.endswith(".in") for p in self.destination.rglob("*")))
 
