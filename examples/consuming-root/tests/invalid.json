@@ -1,0 +1,1 @@
+{"schema_version":1,"repositories":{"pilot":{"name":"offline-fixture","stage":"invalid","required_checks":{"platform-ci":{}}}}}

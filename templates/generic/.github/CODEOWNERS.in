@@ -1,0 +1,16 @@
+# Replace with actual authorized reviewers. Later matching lines override earlier ones.
+/.github/ @{{CODE_OWNER}}
+/.pre-commit-config.yaml @{{CODE_OWNER}}
+/.terraform.lock.hcl @{{CODE_OWNER}}
+/Makefile @{{CODE_OWNER}}
+/scripts/ @{{CODE_OWNER}}
+/tests/ @{{CODE_OWNER}}
+/go.mod @{{CODE_OWNER}}
+/go.sum @{{CODE_OWNER}}
+/.golangci* @{{CODE_OWNER}}
+/*.tf @{{CODE_OWNER}}
+/*.tf.json @{{CODE_OWNER}}
+/*.tftest.hcl @{{CODE_OWNER}}
+/repositories.json @{{CODE_OWNER}}
+/onboarding/ @{{CODE_OWNER}}
+/validation/ @{{CODE_OWNER}}

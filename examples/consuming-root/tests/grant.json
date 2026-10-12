@@ -1,0 +1,1 @@
+{"schema_version":1,"repositories":{"pilot":{"name":"offline-fixture","stage":"grant","provisioning_teams":{"fixture-provisioner":"maintain"},"developer_teams":{"fixture-developers":"push"},"required_checks":{"platform-ci":{}}}}}

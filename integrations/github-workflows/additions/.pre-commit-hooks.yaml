@@ -1,0 +1,5 @@
+- id: repository-hygiene
+  name: Repository hygiene
+  entry: hooks/repository_hygiene.py
+  language: script
+  types: [text]

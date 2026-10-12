@@ -1,0 +1,30 @@
+name: Reusable repository policy fixtures
+on:
+  workflow_call:
+    inputs:
+      trusted-policy-ref:
+        description: Full reviewed github-workflows commit containing policy tooling; promote separately from candidates.
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require immutable policy selection
+        env:
+          POLICY_REF: ${{ inputs.trusted-policy-ref }}
+        run: '[[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: tyler180/github-workflows
+          ref: ${{ inputs.trusted-policy-ref }}
+          persist-credentials: false
+          path: trusted-policy
+      - name: Run trusted offline fixtures without candidate execution
+        working-directory: trusted-policy
+        run: python3 -I automation/repository-policy/test_policy.py
+      - run: python3 -I trusted-policy/automation/repository-policy/test_receipt.py
+      - run: python3 -I trusted-policy/automation/repository-policy/test_hygiene.py

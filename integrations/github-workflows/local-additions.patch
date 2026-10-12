@@ -1,0 +1,1393 @@
+diff --git a/.github/workflows/go-validate.yml b/.github/workflows/go-validate.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/go-validate.yml
+@@ -0,0 +1,51 @@
++name: Reusable Go validation pilot
++on:
++  workflow_call:
++    inputs:
++      go-version:
++        type: string
++        required: true
++      tooling-ref:
++        description: Same reviewed full github-workflows SHA used for this workflow call.
++        type: string
++        required: true
++      working-directory:
++        type: string
++        default: '.'
++permissions:
++  contents: read
++jobs:
++  hygiene:
++    uses: ./.github/workflows/repository-hygiene.yml
++    with:
++      tooling-ref: ${{ inputs.tooling-ref }}
++  validate:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    defaults:
++      run:
++        shell: bash
++        working-directory: ${{ inputs.working-directory }}
++    steps:
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          persist-credentials: false
++      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
++        with:
++          go-version: ${{ inputs.go-version }}
++          cache: false
++      - name: Formatting
++        run: test -z "$(gofmt -l .)"
++      - run: go vet ./...
++      - run: go test -race ./...
++  gate:
++    name: platform-ci
++    needs: [validate, hygiene]
++    if: always()
++    runs-on: ubuntu-latest
++    timeout-minutes: 2
++    env:
++      RESULT: ${{ needs.validate.result }}
++      HYGIENE_RESULT: ${{ needs.hygiene.result }}
++    steps:
++      - run: test "$RESULT" = success && test "$HYGIENE_RESULT" = success
+diff --git a/.github/workflows/repository-hygiene.yml b/.github/workflows/repository-hygiene.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/repository-hygiene.yml
+@@ -0,0 +1,44 @@
++name: Reusable generic repository validation
++on:
++  workflow_call:
++    inputs:
++      tooling-ref:
++        description: Same reviewed full github-workflows SHA used for this workflow call.
++        type: string
++        required: true
++permissions:
++  contents: read
++jobs:
++  validate:
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    defaults:
++      run:
++        shell: bash
++    steps:
++      - name: Require immutable tooling
++        env:
++          TOOLING_REF: ${{ inputs.tooling-ref }}
++        run: '[[ "$TOOLING_REF" =~ ^[0-9a-f]{40}$ ]]'
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          persist-credentials: false
++          path: candidate
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          repository: tyler180/github-workflows
++          ref: ${{ inputs.tooling-ref }}
++          persist-credentials: false
++          path: trusted-tooling
++      - name: Run shared read-only hygiene
++        run: git -C candidate ls-files -z | xargs -0 -r -I '{}' python3 -I trusted-tooling/hooks/repository_hygiene.py 'candidate/{}'
++  gate:
++    name: platform-ci
++    needs: validate
++    if: always()
++    runs-on: ubuntu-latest
++    timeout-minutes: 2
++    env:
++      RESULT: ${{ needs.validate.result }}
++    steps:
++      - run: test "$RESULT" = success
+diff --git a/.github/workflows/repository-policy-fixtures.yml b/.github/workflows/repository-policy-fixtures.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/repository-policy-fixtures.yml
+@@ -0,0 +1,30 @@
++name: Reusable repository policy fixtures
++on:
++  workflow_call:
++    inputs:
++      trusted-policy-ref:
++        description: Full reviewed github-workflows commit containing policy tooling; promote separately from candidates.
++        type: string
++        required: true
++permissions:
++  contents: read
++jobs:
++  fixtures:
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    steps:
++      - name: Require immutable policy selection
++        env:
++          POLICY_REF: ${{ inputs.trusted-policy-ref }}
++        run: '[[ "$POLICY_REF" =~ ^[0-9a-f]{40}$ ]]'
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          repository: tyler180/github-workflows
++          ref: ${{ inputs.trusted-policy-ref }}
++          persist-credentials: false
++          path: trusted-policy
++      - name: Run trusted offline fixtures without candidate execution
++        working-directory: trusted-policy
++        run: python3 -I automation/repository-policy/test_policy.py
++      - run: python3 -I trusted-policy/automation/repository-policy/test_receipt.py
++      - run: python3 -I trusted-policy/automation/repository-policy/test_hygiene.py
+diff --git a/.github/workflows/repository-policy.yml b/.github/workflows/repository-policy.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/repository-policy.yml
+@@ -0,0 +1,80 @@
++name: Reusable offline repository plan policy
++on:
++  workflow_call:
++    inputs:
++      trusted-policy-ref:
++        type: string
++        required: true
++      approved-base-ref:
++        type: string
++        required: true
++      accepted-record-ref:
++        type: string
++        required: true
++      configuration-sha:
++        type: string
++        required: true
++      artifact-id:
++        description: Same-run artifact containing candidate snapshot, plan.json, saved.tfplan, and offline observations.json.
++        type: number
++        required: true
++permissions:
++  contents: read
++jobs:
++  policy:
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    steps:
++      - name: Validate immutable revisions
++        env:
++          POLICY_REF: ${{ inputs.trusted-policy-ref }}
++          BASE_REF: ${{ inputs.approved-base-ref }}
++          RECORD_REF: ${{ inputs.accepted-record-ref }}
++          CONFIG_REF: ${{ inputs.configuration-sha }}
++        run: |
++          for revision in "$POLICY_REF" "$BASE_REF" "$RECORD_REF" "$CONFIG_REF"; do
++            [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || exit 1
++          done
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          repository: tyler180/github-workflows
++          ref: ${{ inputs.trusted-policy-ref }}
++          path: trusted-policy
++          persist-credentials: false
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          ref: ${{ inputs.approved-base-ref }}
++          path: approved-base
++          persist-credentials: false
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          ref: ${{ inputs.accepted-record-ref }}
++          path: accepted-record
++          persist-credentials: false
++      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
++        with:
++          artifact-ids: ${{ inputs.artifact-id }}
++          path: policy-input
++          merge-multiple: true
++      - name: Read-only policy; no candidate Terraform execution
++        env:
++          BASE_REF: ${{ inputs.approved-base-ref }}
++          CONFIG_REF: ${{ inputs.configuration-sha }}
++          POLICY_REF: ${{ inputs.trusted-policy-ref }}
++        run: |
++          python3 -I trusted-policy/automation/repository-policy/policy.py \
++            --base approved-base/repositories.json --base-sha "$BASE_REF" \
++            --record accepted-record/onboarding/accepted.json \
++            --candidate policy-input/candidate/repositories.json \
++            --evidence policy-input/observations.json \
++            --plan-json policy-input/plan.json --saved-plan policy-input/saved.tfplan \
++            --configuration policy-input/candidate --configuration-sha "$CONFIG_REF" \
++            --policy-sha "$POLICY_REF" --receipt offline-receipt.json
++      - name: Explicit authorization boundary
++        run: 'echo "This workflow produces offline bindings only; it cannot authorize deployment."'
++      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: repository-policy-offline-${{ github.run_id }}-${{ github.run_attempt }}
++          path: offline-receipt.json
++          retention-days: 1
++          if-no-files-found: error
+diff --git a/.github/workflows/terraform-module-validate.yml b/.github/workflows/terraform-module-validate.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/terraform-module-validate.yml
+@@ -0,0 +1,61 @@
++name: Reusable Terraform module validation
++on:
++  workflow_call:
++    inputs:
++      terraform-version:
++        type: string
++        required: true
++      tooling-ref:
++        description: Same reviewed full github-workflows SHA used for this workflow call.
++        type: string
++        required: true
++      working-directory:
++        type: string
++        default: '.'
++permissions:
++  contents: read
++jobs:
++  hygiene:
++    uses: ./.github/workflows/repository-hygiene.yml
++    with:
++      tooling-ref: ${{ inputs.tooling-ref }}
++  validate:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    defaults:
++      run:
++        shell: bash
++        working-directory: ${{ inputs.working-directory }}
++    env:
++      TF_IN_AUTOMATION: 'true'
++      TF_INPUT: 'false'
++      GITHUB_TOKEN: ''
++      GH_TOKEN: ''
++      AWS_ACCESS_KEY_ID: ''
++      AWS_SECRET_ACCESS_KEY: ''
++      AWS_SESSION_TOKEN: ''
++      AWS_EC2_METADATA_DISABLED: 'true'
++    steps:
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          persist-credentials: false
++      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
++        with:
++          terraform_version: ${{ inputs.terraform-version }}
++          terraform_wrapper: false
++      - run: terraform fmt -check -recursive
++      - run: terraform init -backend=false -input=false
++      - run: terraform validate -no-color
++      # All delivered tests use command=plan and a mock provider.
++      - run: terraform test -no-color
++  gate:
++    name: platform-ci
++    needs: [validate, hygiene]
++    if: always()
++    runs-on: ubuntu-latest
++    timeout-minutes: 2
++    env:
++      RESULT: ${{ needs.validate.result }}
++      HYGIENE_RESULT: ${{ needs.hygiene.result }}
++    steps:
++      - run: test "$RESULT" = success && test "$HYGIENE_RESULT" = success
+diff --git a/.pre-commit-hooks.yaml b/.pre-commit-hooks.yaml
+new file mode 100644
+--- /dev/null
++++ b/.pre-commit-hooks.yaml
+@@ -0,0 +1,5 @@
++- id: repository-hygiene
++  name: Repository hygiene
++  entry: hooks/repository_hygiene.py
++  language: script
++  types: [text]
+diff --git a/automation/repository-policy/README.md b/automation/repository-policy/README.md
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/README.md
+@@ -0,0 +1,60 @@
++# Trusted repository policy (local-only)
++
++policy.py is a standard-library validator. It reads JSON; it never runs Terraform,
++shell commands, candidate Python, or dynamically selected candidate policy. Use
++`python3 -I` from an immutable reviewed github-workflows checkout. Inputs belong
++in separate candidate, approved-base, accepted-record, and observation directories.
++
++The trusted policy-ref must be selected from the previously approved caller/base
++revision, not candidate inputs. Changes to policy code or its trusted ref require
++separate promotion. CODEOWNERS/reviewers and administrative credential control
++remain trusted. A caller able to change the policy-ref can bypass that boundary;
++the string's SHA format alone does not prove approval.
++
++Delivered adapters accept source=offline-fixture only. Every receipt includes
++deployment_authorized=false. Fake IDs, commits, and successes exist only in test
++fixtures. No live record, API collector, credentialed plan, apply gate, or approved
++record writer is enabled. repository-policy.yml reads same-run artifacts by ID in
++a separate unprivileged job; existing Terraform plan/deploy workflows are unchanged.
++
++CLI required inputs:
++
++- --base: previous accepted repositories.json; --base-sha: immutable revision.
++- --record: separately trusted accepted record (schema 1, configuration_sha,
++  inventory_digest, repositories with immutable IDs/name/stage/tooling_digest).
++- --candidate: bound snapshot's repositories.json.
++- --evidence: schema 1 observations, each marked offline-fixture, with fresh UTC
++  timestamp, matching identity/tooling digest, bootstrap commits, checks, negative
++  validation, and effective protection facts when granting access.
++- --plan-json: full format-1.2 Terraform plan JSON; --saved-plan: corresponding
++  bytes. Fixture tests use clearly labeled fake saved-plan bytes.
++- --configuration and --configuration-sha: exact snapshot and producer revision.
++- --policy-sha: trusted policy revision; --receipt: output outside snapshot.
++
++The receipt hashes snapshot file paths/bytes (excluding .git/.terraform caches),
++saved-plan bytes, plan JSON, policy implementation, and all inputs. It binds base,
++candidate, and policy revisions. verify_receipt.py repeats evaluation with fresh
++inputs/time and refuses changed bytes, records, evidence, policy, or revisions.
++
++These hashes provide substitution detection, not signature/attestation. The CLI
++cannot prove claimed commits supplied a snapshot, that JSON was generated from
++the binary plan, or that offline observation facts happened. Before live rollout,
++trusted artifact collection must verify those relationships independently and
++query GitHub for actual runs/commits/effective access and protections. No signed
++receipt system is invented here. A future live adapter must not accept these
++offline receipts as deployment authorization.
++
++The policy rejects skipped/backward stages, unmatched accepted bases, destruction,
++replacement, unmanaged-field changes, visibility changes, archival, imports,
++drift, unknown critical values, unexpected resources, and premature grants. Root
++baseline review policy is fixed; no bypass actors. Developer teams use pull,
++triage, or push. Changing provisioners or existing Actions policy requires a
++separate reviewed lifecycle/security procedure. Full planned values are checked
++against inventory and against resource_changes, not only changed resources.
++
++Check-name removals require overlap and renewed observations. Actual strong
++enforcement is account-specific: dummy jobs can satisfy a check context; code-owner
++review is the initial defense. Stronger workflow identity requires central policy.
++
++Run test_policy.py, test_receipt.py, and test_hygiene.py with python3 -I. No third
++party packages, live credentials, backend, or successful live evidence are needed.
+diff --git a/automation/repository-policy/policy.py b/automation/repository-policy/policy.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/policy.py
+@@ -0,0 +1,400 @@
++#!/usr/bin/env python3
++"""Read-only, dependency-free policy evaluation. Never executes candidate code.
++
++Offline receipts are integrity bindings, not deployment authorization. A future
++live collector must independently verify evidence and plan/JSON correspondence.
++"""
++
++import argparse
++import hashlib
++import json
++import re
++import sys
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++STAGES = ("create", "bootstrap", "verify", "protect", "grant")
++SHA = re.compile(r"^[0-9a-f]{40}$")
++MODULE = re.compile(r'^module\.repositories\[("(?:[^"\\]|\\.)*")\]$')
++ALLOWED = {
++    "github_repository", "github_branch_default", "github_team_repository",
++    "github_actions_repository_permissions", "github_workflow_repository_permissions",
++    "github_repository_ruleset",
++}
++FRESHNESS = timedelta(hours=24)
++
++
++class PolicyError(ValueError):
++    """A mandatory safeguard failed."""
++
++
++def require(condition, message):
++    if not condition:
++        raise PolicyError(message)
++
++
++def canonical(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
++
++
++def digest(data):
++    return hashlib.sha256(data).hexdigest()
++
++
++def load_json(path):
++    def unique(pairs):
++        result = {}
++        for key, value in pairs:
++            require(key not in result, "Duplicate JSON key")
++            result[key] = value
++        return result
++    path = Path(path)
++    require(not path.is_symlink() and path.is_file(), "Input must be a regular file")
++    require(path.stat().st_size < 32 * 1024 * 1024, "Input exceeds size limit")
++    return json.loads(path.read_text(), object_pairs_hook=unique)
++
++
++def tree_digest(directory):
++    """Hash all snapshot bytes; only VCS/provider caches are excluded.
++
++    Artifacts must be outside the configuration snapshot. Configuration symlinks
++    are rejected; VCS metadata and downloaded provider caches are not inputs.
++    """
++    directory = Path(directory)
++    require(directory.is_dir() and not directory.is_symlink(), "Invalid snapshot directory")
++    entries = []
++    for path in sorted(directory.rglob("*")):
++        relative = path.relative_to(directory)
++        if relative.parts[0] in (".git", ".terraform"):
++            continue
++        require(not path.is_symlink(), "Configuration symlinks are unsupported")
++        if path.is_file():
++            require(path.stat().st_size < 32 * 1024 * 1024, "Snapshot file exceeds size limit")
++            entries.append([relative.as_posix(), digest(path.read_bytes())])
++    require(entries, "Empty configuration snapshot")
++    return digest(canonical(entries))
++
++
++def tooling_digest(repo):
++    return digest(canonical({
++        "tooling": repo.get("tooling", {}),
++        "required_checks": normalize_checks(repo.get("required_checks", {})),
++    }))
++
++
++def normalize_checks(checks):
++    return {key: {"integration_id": value["integration_id"]} if value.get("integration_id") else {} for key, value in checks.items()}
++
++
++def inventories(value):
++    require(isinstance(value, dict) and value.get("schema_version") == 1, "Unsupported inventory schema")
++    repos = value.get("repositories")
++    require(isinstance(repos, dict), "Missing repository inventory")
++    names = []
++    for key, repo in repos.items():
++        require(isinstance(repo, dict), "Repository inventory entry must be an object")
++        require(re.fullmatch(r"[A-Za-z0-9_-]+", key), "Invalid stable inventory key")
++        require(repo.get("stage") in STAGES, "Invalid stage")
++        require(re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", repo.get("name", "")), "Invalid repository name")
++        names.append(repo["name"].lower())
++        provisioners = repo.get("provisioning_teams", {})
++        developers = repo.get("developer_teams", {})
++        require(isinstance(provisioners, dict) and isinstance(developers, dict), "Invalid team maps")
++        require(not set(provisioners) & set(developers), "Team classifications overlap")
++        require(all(p in ("pull", "triage", "push", "maintain", "admin") for p in [*provisioners.values(), *developers.values()]), "Invalid team permission")
++        checks = repo.get("required_checks", {})
++        require(isinstance(checks, dict), "Check contract must be a map")
++        require(all(isinstance(v, dict) and k.strip() for k, v in checks.items()), "Invalid check contract")
++        require(all(set(v) <= {"integration_id"} and (v.get("integration_id") is None or (type(v["integration_id"]) is int and v["integration_id"] > 0)) for v in checks.values()), "Explicit integration IDs must be positive integers")
++        if repo["stage"] in ("protect", "grant"):
++            require(checks, "Protected stage needs deterministic checks")
++    require(len(names) == len(set(names)), "Duplicate repository names")
++    return repos
++
++
++def timestamp(value):
++    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
++    require(parsed.tzinfo is not None, "Timestamp requires timezone")
++    return parsed
++
++
++def observations(repo, prior, observed, now, needs_protection):
++    require(isinstance(observed, dict), "Missing independently supplied observation")
++    require(observed.get("source") == "offline-fixture", "Only clearly marked offline observations are supported locally")
++    require(SHA.fullmatch(observed.get("head_sha", "")), "Missing observed content commit")
++    require(observed.get("repository_id") == prior.get("repository_id") and type(prior.get("repository_id")) is int and prior["repository_id"] > 0, "Repository identity mismatch")
++    require(observed.get("tooling_digest") == tooling_digest(repo), "Tooling/check evidence is stale")
++    age = now - timestamp(observed.get("observed_at", ""))
++    require(timedelta(0) <= age <= FRESHNESS, "Observation is stale or in the future")
++    bootstrap = observed.get("bootstrap", {})
++    require(bootstrap.get("mode") in ("template", "exact-source"), "Missing bootstrap provenance")
++    require(all(SHA.fullmatch(bootstrap.get(k, "")) for k in ("source_sha", "initial_commit", "merged_commit")), "Incomplete bootstrap commit provenance")
++    if STAGES.index(repo["stage"]) >= STAGES.index("verify"):
++        checks = observed.get("checks", [])
++        for context, contract in repo.get("required_checks", {}).items():
++            require(any(c.get("context") == context and c.get("conclusion") == "success" and c.get("head_sha") == observed["head_sha"] and c.get("event") in ("pull_request", "push", "merge_group") and type(c.get("run_id")) is int and c["run_id"] > 0 and (contract.get("integration_id") is None or c.get("integration_id") == contract["integration_id"]) for c in checks), "Missing successful eligible check observation")
++        require(observed.get("negative_validation_failed") is True, "Negative validation not demonstrated")
++    if needs_protection:
++        for flag in ("protection_active", "codeowner_review_required", "force_push_blocked", "deletion_blocked", "dummy_substitution_review_blocked", "untrusted_push_blocked"):
++            require(observed.get(flag) is True, "Protection observation failed: " + flag)
++        require(normalize_checks(observed.get("effective_required_checks", {})) == normalize_checks(repo.get("required_checks", {})), "Effective checks differ from verified contract")
++
++
++def validate_transition(base, record, candidate, evidence, now):
++    previous, proposed = inventories(base), inventories(candidate)
++    require(record.get("schema_version") == 1 and isinstance(record.get("repositories"), dict), "Missing accepted deployment record")
++    require(SHA.fullmatch(record.get("configuration_sha", "")), "Accepted record needs an immutable base revision")
++    require(record.get("inventory_digest") == digest(canonical(base)), "Approved inventory differs from accepted baseline")
++    require(evidence.get("schema_version") == 1, "Unsupported evidence schema")
++    require(set(previous) <= set(proposed), "Ordinary inventory removal is prohibited")
++    require(set(record["repositories"]) == set(previous), "Approved base and accepted record inventory disagree")
++    for key, repo in proposed.items():
++        if key not in previous:
++            require(repo["stage"] == "create", "New repository must start at create")
++            continue
++        old = previous[key]
++        accepted = record["repositories"][key]
++        require(accepted.get("stage") == old["stage"] and accepted.get("name") == old["name"], "Approved base differs from accepted deployment record")
++        require(accepted.get("tooling_digest") == tooling_digest(old), "Accepted tooling baseline mismatch")
++        step = STAGES.index(repo["stage"]) - STAGES.index(old["stage"])
++        require(step in (0, 1), "Skipped or backward stage transition")
++        require(repo["name"] == old["name"], "Rename requires advanced migration")
++        require(repo.get("provisioning_teams", {}) == old.get("provisioning_teams", {}), "Provisioning grants require a separate access review")
++        require(all(p in ("pull", "triage", "push") for p in repo.get("developer_teams", {}).values()), "Developer stage does not grant administrative roles")
++        require(repo.get("initialization", "basic") == old.get("initialization", "basic") and repo.get("template") == old.get("template"), "Creation intent cannot change")
++        changed = tooling_digest(repo) != tooling_digest(old)
++        if repo["stage"] != "create":
++            # At grant stage, changed tooling is evaluated in a content PR first;
++            # the root may not alter enforcement until effective checks match.
++            observations(repo, accepted, evidence.get("repositories", {}).get(key), now,
++                         needs_protection=(repo["stage"] == "grant"))
++        if old["stage"] in ("protect", "grant"):
++            removed = set(old.get("required_checks", {})) - set(repo.get("required_checks", {}))
++            if removed:
++                retained = set(old.get("required_checks", {})) & set(repo.get("required_checks", {}))
++                require(retained, "Check migration requires verified overlap")
++        if changed and old["stage"] == "grant":
++            require(repo["stage"] == "grant", "Tooling updates must retain onboarding stage")
++
++
++def resources(module):
++    for item in module.get("resources", []):
++        # planned_values resources inherit their module address from the
++        # enclosing child_modules entry; resource_changes carries it directly.
++        yield {**item, "module_address": module.get("address", "")}
++    for child in module.get("child_modules", []):
++        yield from resources(child)
++
++
++def repo_key(resource):
++    match = MODULE.fullmatch(resource.get("module_address", ""))
++    require(match is not None, "Unexpected resource module address")
++    return json.loads(match.group(1))
++
++
++def one(blocks, label):
++    require(isinstance(blocks, list) and len(blocks) == 1, "Expected one " + label)
++    return blocks[0]
++
++
++def has_unknown(value):
++    if isinstance(value, dict):
++        return any(has_unknown(v) for v in value.values())
++    if isinstance(value, list):
++        return any(has_unknown(v) for v in value)
++    return value is True
++
++
++def validate_repository(repo, value):
++    require(value.get("name") == repo["name"], "Planned repository identity mismatch")
++    methods = repo.get("merge_methods", ["squash"])
++    expected = {
++        "visibility": repo.get("visibility", "private"),
++        "description": repo.get("description", ""),
++        "homepage_url": repo.get("homepage_url", ""),
++        "delete_branch_on_merge": repo.get("delete_branch_on_merge", True),
++        "allow_auto_merge": repo.get("allow_auto_merge", False),
++        "allow_update_branch": repo.get("allow_update_branch", True),
++        "archived": repo.get("archived", False),
++        "archive_on_destroy": True,
++        "allow_merge_commit": "merge" in methods,
++        "allow_squash_merge": "squash" in methods,
++        "allow_rebase_merge": "rebase" in methods,
++    }
++    features = repo.get("features", {})
++    expected.update({"has_" + name: features.get(key, default) for name, key, default in (
++        ("issues", "issues", True), ("discussions", "discussions", False),
++        ("wiki", "wiki", False), ("projects", "projects", False))})
++    require(all(value.get(k) == v for k, v in expected.items()), "Repository settings differ from inventory or are unknown")
++    require(sorted(value.get("topics", [])) == sorted(repo.get("topics", [])), "Planned topics differ")
++
++
++def validate_plan(candidate, base, record, plan):
++    repos, previous = inventories(candidate), inventories(base)
++    require(plan.get("format_version") == "1.2" and plan.get("complete") is True and plan.get("errored") is False, "Only complete, error-free format 1.2 plans are accepted")
++    require(not plan.get("deferred_changes"), "Deferred changes are unsupported")
++    require(not plan.get("resource_drift"), "Resolve remote drift before ordinary deployment")
++    changes = plan.get("resource_changes")
++    require(isinstance(changes, list), "Missing complete resource change list")
++    require(plan.get("applyable") is True or (plan.get("applyable") is False and all(item.get("change", {}).get("actions") == ["no-op"] for item in changes)), "Non-applyable plan contains changes")
++    for item in changes:
++        change = item.get("change", {})
++        actions = change.get("actions")
++        require(actions in (["no-op"], ["create"], ["update"]), "Destructive, replacement, or unsupported plan action")
++        require("importing" not in change, "Use the separately reviewed adoption procedure")
++        if item.get("type") == "terraform_data":
++            require(item.get("address") == "terraform_data.contract", "Unexpected root guard")
++            require(item.get("provider_name") == "terraform.io/builtin/terraform", "Unexpected guard provider")
++            continue
++        require(item.get("type") in ALLOWED and item.get("mode") == "managed", "Unexpected resource type or data-source execution")
++        require(item.get("provider_name") == "registry.terraform.io/integrations/github", "Unexpected GitHub provider")
++        key = repo_key(item)
++        require(key in repos, "Resource has no inventory owner")
++        before, after = change.get("before") or {}, change.get("after") or {}
++        unknown = change.get("after_unknown") or {}
++        harmless_computed = {"id", "repo_id", "repository_id", "node_id", "ruleset_id", "etag", "html_url", "ssh_clone_url", "http_clone_url", "git_clone_url", "svn_url", "primary_language"}
++        if item["type"] == "github_repository" and key not in previous and actions == ["create"]:
++            # Newly created external/computed configuration is inspected after
++            # creation. It must not be guessed in a pre-creation plan.
++            harmless_computed.update({"security_and_analysis", "allow_forking", "vulnerability_alerts", "default_branch", "pages"})
++        require(not has_unknown({k: v for k, v in unknown.items() if k not in harmless_computed}), "Unknown critical policy value")
++        if item["type"] == "github_repository":
++            if key in previous:
++                require(actions != ["create"], "Existing repository cannot be recreated")
++                require(before.get("repo_id") == record["repositories"][key].get("repository_id"), "Plan repository ID differs from accepted record")
++            require(after.get("archived") is not True, "Archival requires retirement procedure")
++            if before:
++                require(before.get("visibility") == after.get("visibility"), "Visibility change requires separate security review")
++            for field in ("security_and_analysis", "allow_forking", "is_template", "web_commit_signoff_required", "vulnerability_alerts", "default_branch", "pages"):
++                if before:
++                    require(before.get(field) == after.get(field), "Unmanaged repository field changed: " + field)
++        elif item["type"] == "github_repository_ruleset" and before.get("enforcement") == "active":
++            require(after.get("enforcement") == "active", "Protection cannot be disabled")
++        elif item["type"] in ("github_actions_repository_permissions", "github_workflow_repository_permissions") and before:
++            # Ordinary ownership release and policy relaxation need a separate
++            # tested migration. V1 allows initial management, then only no-op.
++            require(actions == ["no-op"], "Actions policy updates require explicit ownership/security review")
++        elif item["type"] == "github_branch_default" and before:
++            require(before.get("branch") == after.get("branch"), "Branch rename requires migration")
++
++    root = plan.get("planned_values", {}).get("root_module")
++    require(isinstance(root, dict), "Missing complete planned values")
++    grouped = {key: [] for key in repos}
++    addresses = set()
++    guards = []
++    for item in resources(root):
++        require(item.get("address") not in addresses, "Duplicate planned address")
++        addresses.add(item.get("address"))
++        if item.get("type") == "terraform_data":
++            require(item.get("address") == "terraform_data.contract", "Unexpected root resource")
++            require(item.get("provider_name") == "terraform.io/builtin/terraform", "Unexpected guard provider")
++            guards.append(item)
++            require(item.get("values", {}).get("input") == candidate, "Root plan is not bound to candidate inventory")
++            continue
++        require(item.get("type") in ALLOWED and item.get("mode") == "managed", "Unexpected planned resource")
++        require(item.get("provider_name") == "registry.terraform.io/integrations/github", "Unexpected planned provider")
++        key = repo_key(item)
++        require(key in grouped, "Unknown planned module")
++        grouped[key].append(item)
++    require(len(guards) == 1, "Missing root contract")
++    require(addresses == {c.get("address") for c in changes}, "Plan changes and planned values do not cover the same resources")
++    require(len(changes) == len(addresses), "Duplicate resource change address")
++    changes_by_address = {c["address"]: c for c in changes}
++    for item in resources(root):
++        after = changes_by_address[item["address"]].get("change", {}).get("after") or {}
++        require(all(after.get(k) == v for k, v in item.get("values", {}).items()), "Plan change and planned value disagree")
++    for key, repo in repos.items():
++        items = grouped[key]
++        repositories = [r for r in items if r["type"] == "github_repository"]
++        validate_repository(repo, one(repositories, "repository")["values"])
++        teams = [r for r in items if r["type"] == "github_team_repository"]
++        expected_teams = dict(repo.get("provisioning_teams", {}))
++        if repo["stage"] == "grant":
++            expected_teams.update(repo.get("developer_teams", {}))
++        actual_teams = {str(r["values"].get("team_id")): r["values"].get("permission") for r in teams}
++        require(len(actual_teams) == len(teams) and actual_teams == expected_teams, "Premature or undeclared team grant")
++        for r in teams:
++            require(r["values"].get("repository") == repo["name"], "Team grant targets wrong repository")
++        rs = one([r for r in items if r["type"] == "github_repository_ruleset"], "ruleset")["values"]
++        require(rs.get("repository") == repo["name"] and rs.get("target") == "branch", "Wrong ruleset target")
++        require(not rs.get("bypass_actors"), "Root baseline does not permit bypass actors")
++        condition = one(one(rs.get("conditions"), "conditions").get("ref_name"), "ref_name")
++        require(condition.get("include") == ["~DEFAULT_BRANCH"] and condition.get("exclude") == [], "Protection scope changed")
++        require(rs.get("enforcement") == ("active" if repo["stage"] in ("protect", "grant") else "disabled"), "Wrong ruleset enforcement")
++        rules = one(rs.get("rules"), "rules")
++        require(rules.get("deletion") is True and rules.get("non_fast_forward") is True, "Missing deletion/force-push protection")
++        pr = one(rules.get("pull_request"), "pull request policy")
++        require(pr.get("required_approving_review_count") == 1 and all(pr.get(flag) is True for flag in ("require_code_owner_review", "dismiss_stale_reviews_on_push", "require_last_push_approval", "required_review_thread_resolution")), "Review policy weakened or unknown")
++        checks = repo.get("required_checks", {})
++        status = rules.get("required_status_checks") or []
++        if checks:
++            status = one(status, "status policy")
++            require(status.get("strict_required_status_checks_policy") is True, "Strict check policy missing")
++            # SDK defaults omitted integration IDs to 0; this means no source
++            # restriction, not an invented GitHub integration identity.
++            actual = normalize_checks({c["context"]: {"integration_id": c.get("integration_id")} for c in status.get("required_check", [])})
++            require(actual == normalize_checks(checks), "Planned check contract differs")
++        else:
++            require(not status, "Unexpected status policy")
++        for kind, field in (("github_actions_repository_permissions", "actions_policy"), ("github_workflow_repository_permissions", "workflow_permissions"), ("github_branch_default", "default_branch")):
++            matches = [r for r in items if r["type"] == kind]
++            configured = repo.get(field)
++            require(len(matches) == (1 if configured is not None else 0), "Optional component ownership mismatch")
++            if matches:
++                value = matches[0]["values"]
++                require(value.get("repository") == repo["name"], "Optional policy targets wrong repository")
++                if field == "default_branch":
++                    require(value.get("branch") == configured and value.get("rename") == repo.get("rename_default_branch", False), "Branch policy mismatch")
++                elif field == "workflow_permissions":
++                    require(all(value.get(k) == configured[k] for k in ("default_workflow_permissions", "can_approve_pull_request_reviews")), "Workflow policy mismatch")
++                else:
++                    require(all(value.get(k) == configured[k] for k in ("enabled", "allowed_actions", "sha_pinning_required")), "Actions policy mismatch")
++                    require((value.get("allowed_actions_config") or []) == ([configured["selected"]] if configured.get("selected") is not None else []), "Actions allowlist mismatch")
++
++
++def evaluate(base, record, candidate, evidence, plan, now):
++    validate_transition(base, record, candidate, evidence, now)
++    validate_plan(candidate, base, record, plan)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    for option in ("base", "base-sha", "record", "candidate", "evidence", "plan-json", "saved-plan", "configuration", "receipt", "configuration-sha", "policy-sha"):
++        parser.add_argument("--" + option, required=True)
++    args = parser.parse_args()
++    try:
++        require(all(SHA.fullmatch(value) for value in (args.configuration_sha, args.policy_sha, args.base_sha)), "Commit arguments must be full SHAs")
++        config = Path(args.configuration).resolve()
++        candidate_path = Path(args.candidate).resolve()
++        require(candidate_path == config / "repositories.json", "Candidate inventory must be inside the bound snapshot")
++        for artifact in (args.plan_json, args.saved_plan, args.receipt):
++            require(not Path(artifact).resolve().is_relative_to(config), "Artifacts must be outside configuration snapshot")
++        inputs = {key: load_json(getattr(args, key.replace("-", "_"))) for key in ("base", "record", "candidate", "evidence", "plan-json")}
++        require(inputs["record"].get("configuration_sha") == args.base_sha, "Record does not match trusted base revision")
++        saved = Path(args.saved_plan)
++        require(saved.is_file() and not saved.is_symlink(), "Saved plan must be a regular file")
++        now = datetime.now(timezone.utc)
++        evaluate(inputs["base"], inputs["record"], inputs["candidate"], inputs["evidence"], inputs["plan-json"], now)
++        receipt = {
++            "schema_version": 1, "result": "pass", "mode": "offline-fixture",
++            "deployment_authorized": False,
++            "configuration_sha": args.configuration_sha, "policy_sha": args.policy_sha,
++            "base_sha": args.base_sha,
++            "policy_implementation_digest": digest(Path(__file__).read_bytes()),
++            "configuration_digest": tree_digest(config),
++            "saved_plan_digest": digest(saved.read_bytes()),
++            "plan_json_digest": digest(Path(args.plan_json).read_bytes()),
++            "input_digests": {key: digest(canonical(value)) for key, value in inputs.items()},
++            "evaluated_at": now.isoformat(),
++        }
++        Path(args.receipt).write_text(json.dumps(receipt, indent=2) + "\n")
++        print("Offline policy passed; receipt is NOT deployment authorization.")
++        return 0
++    except (PolicyError, ValueError, TypeError, KeyError, OSError) as error:
++        # Never print candidate data, plan values, or exception details from JSON.
++        print("Policy validation failed: " + (str(error) if isinstance(error, PolicyError) else type(error).__name__), file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/automation/repository-policy/test_hygiene.py b/automation/repository-policy/test_hygiene.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_hygiene.py
+@@ -0,0 +1,33 @@
++import importlib.util
++import tempfile
++import unittest
++from pathlib import Path
++
++spec = importlib.util.spec_from_file_location("hygiene", Path(__file__).resolve().parents[2] / "hooks" / "repository_hygiene.py")
++hygiene = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(hygiene)
++
++
++class HookTests(unittest.TestCase):
++    def test_clean_file(self):
++        self.assertEqual(hygiene.violations("clean\n"), [])
++
++    def test_bad_file(self):
++        self.assertEqual(len(hygiene.violations("bad \n<<<<<<< branch\n=======\n>>>>>>> branch\n")), 4)
++
++    def test_read_only(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "bad.txt"
++            path.write_text("bad \n")
++            self.assertEqual(hygiene.main([str(path)]), 1)
++            self.assertEqual(path.read_text(), "bad \n")
++
++    def test_patch_context_is_not_source_whitespace(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "review.patch"
++            path.write_text(" \n")
++            self.assertEqual(hygiene.main([str(path)]), 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/automation/repository-policy/test_policy.py b/automation/repository-policy/test_policy.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_policy.py
+@@ -0,0 +1,304 @@
++"""Offline adversarial fixtures; no assertion here represents live evidence."""
++import copy
++import importlib.util
++import json
++import tempfile
++import unittest
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++spec = importlib.util.spec_from_file_location("policy", Path(__file__).with_name("policy.py"))
++policy = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(policy)
++NOW = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
++
++
++def fixture(old_stage="verify", stage="protect"):
++    repo = {
++        "name": "offline-fixture", "stage": old_stage,
++        "required_checks": {"platform-ci": {}},
++        "provisioning_teams": {"fixture-provisioner": "maintain"},
++        "developer_teams": {"fixture-developers": "push"},
++        "tooling": {"workflow_sha": "a" * 40, "hooks_sha": "b" * 40},
++    }
++    base = {"schema_version": 1, "repositories": {"pilot": copy.deepcopy(repo)}}
++    repo["stage"] = stage
++    candidate = {"schema_version": 1, "repositories": {"pilot": repo}}
++    record = {"schema_version": 1, "configuration_sha": "1"*40, "inventory_digest": policy.digest(policy.canonical(base)), "repositories": {"pilot": {
++        "stage": old_stage, "name": repo["name"], "repository_id": 123,
++        "tooling_digest": policy.tooling_digest(repo),
++    }}}
++    observed = {
++        "source": "offline-fixture", "repository_id": 123,
++        "head_sha": "c" * 40, "tooling_digest": policy.tooling_digest(repo),
++        "observed_at": NOW.isoformat(),
++        "bootstrap": {"mode": "template", "source_sha": "d" * 40,
++                      "initial_commit": "e" * 40, "merged_commit": "c" * 40},
++        "checks": [{"context": "platform-ci", "conclusion": "success",
++                    "head_sha": "c" * 40, "run_id": 1, "event": "pull_request"}],
++        "negative_validation_failed": True,
++        "protection_active": True, "codeowner_review_required": True,
++        "force_push_blocked": True, "deletion_blocked": True,
++        "dummy_substitution_review_blocked": True, "untrusted_push_blocked": True,
++        "effective_required_checks": {"platform-ci": {}},
++    }
++    evidence = {"schema_version": 1, "repositories": {"pilot": observed}}
++    repository = {
++        "name": repo["name"], "repo_id": 123, "visibility": "private",
++        "description": "", "homepage_url": "", "topics": [],
++        "allow_merge_commit": False, "allow_squash_merge": True,
++        "allow_rebase_merge": False, "allow_auto_merge": False,
++        "allow_update_branch": True, "delete_branch_on_merge": True,
++        "archived": False, "archive_on_destroy": True,
++        "has_issues": True, "has_discussions": False,
++        "has_wiki": False, "has_projects": False,
++    }
++    ruleset = {
++        "repository": repo["name"], "name": "platform-default-branch",
++        "target": "branch", "enforcement": "active" if stage in ("protect", "grant") else "disabled",
++        "bypass_actors": [],
++        "conditions": [{"ref_name": [{"include": ["~DEFAULT_BRANCH"], "exclude": []}]}],
++        "rules": [{"deletion": True, "non_fast_forward": True, "pull_request": [{
++            "required_approving_review_count": 1, "require_code_owner_review": True,
++            "dismiss_stale_reviews_on_push": True, "require_last_push_approval": True,
++            "required_review_thread_resolution": True,
++        }], "required_status_checks": [{"strict_required_status_checks_policy": True,
++                "required_check": [{"context": "platform-ci", "integration_id": None}]}]}],
++    }
++    prefix = 'module.repositories["pilot"]'
++    entries = [("github_repository.this", "github_repository", repository),
++               ('github_repository_ruleset.this["managed"]', "github_repository_ruleset", ruleset)]
++    teams = dict(repo["provisioning_teams"])
++    if stage == "grant":
++        teams.update(repo["developer_teams"])
++    for team, permission in teams.items():
++        entries.append((f'github_team_repository.this["{team}"]', "github_team_repository",
++                        {"repository": repo["name"], "team_id": team, "permission": permission}))
++    planned = []
++    changes = []
++    for address, kind, values in entries:
++        full = prefix + "." + address
++        planned.append({"address": full, "mode": "managed", "type": kind, "values": values, "provider_name": "registry.terraform.io/integrations/github"})
++        before = copy.deepcopy(values)
++        if kind == "github_repository_ruleset":
++            before["enforcement"] = "active" if old_stage in ("protect", "grant") else "disabled"
++        changes.append({"address": full, "module_address": prefix, "mode": "managed", "type": kind, "provider_name": "registry.terraform.io/integrations/github",
++                        "change": {"actions": ["update"], "before": before, "after": copy.deepcopy(values), "after_unknown": {}}})
++    guard = {"address": "terraform_data.contract", "mode": "managed", "type": "terraform_data", "provider_name": "terraform.io/builtin/terraform", "values": {"input": candidate}}
++    changes.append({**guard, "change": {"actions": ["update"], "before": {}, "after": guard["values"]}})
++    plan = {"format_version": "1.2", "complete": True, "errored": False, "applyable": True,
++            "resource_changes": changes,
++            "planned_values": {"root_module": {"resources": [guard], "child_modules": [{"address": prefix, "resources": planned}]}}}
++    return base, record, candidate, evidence, plan
++
++
++class PolicyTests(unittest.TestCase):
++    def assert_rejected(self, mutate, old="verify", stage="protect"):
++        args = fixture(old, stage)
++        mutate(*args)
++        with self.assertRaises(policy.PolicyError):
++            policy.evaluate(*args, NOW)
++
++    def test_forward_protection(self):
++        policy.evaluate(*fixture(), NOW)
++
++    def test_same_stage_retry(self):
++        policy.evaluate(*fixture("verify", "verify"), NOW)
++
++    def test_grant_after_protection(self):
++        policy.evaluate(*fixture("protect", "grant"), NOW)
++
++    def test_new_create(self):
++        args = fixture("create", "create")
++        args[0]["repositories"] = {}
++        args[1]["repositories"] = {}
++        args[1]["inventory_digest"] = policy.digest(policy.canonical(args[0]))
++        args[4]["resource_changes"][0]["change"]["actions"] = ["create"]
++        args[4]["resource_changes"][0]["change"]["before"] = None
++        policy.evaluate(*args, NOW)
++
++    def test_skip(self):
++        self.assert_rejected(lambda *args: None, "bootstrap", "grant")
++
++    def test_backward(self):
++        self.assert_rejected(lambda *args: None, "protect", "verify")
++
++    def test_forged_record(self):
++        self.assert_rejected(lambda b, r, *rest: r["repositories"]["pilot"].update(stage="grant"))
++
++    def test_missing_record(self):
++        self.assert_rejected(lambda b, r, *rest: r.clear())
++
++    def test_approved_inventory_binding(self):
++        self.assert_rejected(lambda b, r, *rest: b["repositories"]["pilot"].update(description="unapproved"))
++
++    def test_unknown_after_value(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0]["change"].update(after_unknown={"visibility": True}))
++
++    def test_plan_sections_disagree(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0]["change"]["after"].update(visibility="public"))
++
++    def test_no_change_plan(self):
++        args = fixture("verify", "verify")
++        for item in args[4]["resource_changes"]:
++            item["change"]["actions"] = ["no-op"]
++        args[4]["applyable"] = False
++        policy.evaluate(*args, NOW)
++
++    def test_missing_evidence(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"].clear())
++
++    def test_live_claim_is_not_supported(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(source="github-observation"))
++
++    def test_stale_evidence(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(observed_at=(NOW-timedelta(hours=25)).isoformat()))
++
++    def test_future_evidence(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(observed_at=(NOW+timedelta(seconds=1)).isoformat()))
++
++    def test_pin_change_needs_new_evidence(self):
++        self.assert_rejected(lambda b, r, c, e, p: c["repositories"]["pilot"]["tooling"].update(workflow_sha="f"*40), "grant", "grant")
++
++    def test_repository_id_mismatch(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(repository_id=999))
++
++    def test_dummy_substitution_needs_review(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(dummy_substitution_review_blocked=False), "protect", "grant")
++
++    def test_failed_check(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"]["checks"][0].update(conclusion="failure"))
++
++    def test_skipped_check(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"]["checks"][0].update(conclusion="skipped"))
++
++    def test_cancelled_check(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"]["checks"][0].update(conclusion="cancelled"))
++
++    def test_manual_check_not_proof(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"]["checks"][0].update(event="workflow_dispatch"))
++
++    def test_destructive_actions(self):
++        for actions in (["delete"], ["delete", "create"], ["create", "delete"]):
++            with self.subTest(actions=actions):
++                self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0]["change"].update(actions=actions))
++
++    def test_partial_recreation(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0]["change"].update(actions=["create"]))
++
++    def test_incomplete_plan(self):
++        self.assert_rejected(lambda b, r, c, e, p: p.update(complete=False))
++
++    def test_deferred_plan(self):
++        self.assert_rejected(lambda b, r, c, e, p: p.update(deferred_changes=[{}]))
++
++    def test_drift_requires_reconciliation(self):
++        self.assert_rejected(lambda b, r, c, e, p: p.update(resource_drift=[{}]))
++
++    def test_unknown_protection(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"].pop("enforcement"))
++
++    def test_weakened_review(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]["rules"][0]["pull_request"][0].update(require_code_owner_review=False))
++
++    def test_security_reset(self):
++        def mutate(b, r, c, e, p):
++            p["resource_changes"][0]["change"]["before"]["security_and_analysis"] = {"secret_scanning": "enabled"}
++        self.assert_rejected(mutate)
++
++    def test_premature_grant(self):
++        def mutate(b, r, c, e, p):
++            items = p["planned_values"]["root_module"]["child_modules"][0]["resources"]
++            team = copy.deepcopy(items[-1])
++            team["address"] = 'module.repositories["pilot"].github_team_repository.this["fixture-developers"]'
++            team["values"].update(team_id="fixture-developers", permission="push")
++            items.append(team)
++            p["resource_changes"].append({**team, "module_address": 'module.repositories["pilot"]', "change": {"actions": ["create"], "after": team["values"]}})
++        self.assert_rejected(mutate)
++
++    def test_unlisted_resource(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0].update(type="github_actions_secret"))
++
++    def test_wrong_provider(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"][0].update(provider_name="example.invalid/custom/github"))
++
++    def test_provider_zero_integration_default(self):
++        args = fixture()
++        item = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]
++        item["values"]["rules"][0]["required_status_checks"][0]["required_check"][0]["integration_id"] = 0
++        args[4]["resource_changes"][1]["change"]["after"] = copy.deepcopy(item["values"])
++        policy.evaluate(*args, NOW)
++
++    def test_pin_update_after_grant_with_fresh_evidence(self):
++        args = fixture("grant", "grant")
++        repo = args[2]["repositories"]["pilot"]
++        repo["tooling"]["workflow_sha"] = "f" * 40
++        args[3]["repositories"]["pilot"]["tooling_digest"] = policy.tooling_digest(repo)
++        policy.evaluate(*args, NOW)
++
++    def test_incomplete_resource_list(self):
++        self.assert_rejected(lambda b, r, c, e, p: p["resource_changes"].pop())
++
++    def test_empty_check_overlap(self):
++        def mutate(b, r, c, e, p):
++            c["repositories"]["pilot"]["required_checks"] = {"new-check": {}}
++            e["repositories"]["pilot"]["tooling_digest"] = policy.tooling_digest(c["repositories"]["pilot"])
++            e["repositories"]["pilot"]["effective_required_checks"] = {"new-check": {}}
++            e["repositories"]["pilot"]["checks"][0]["context"] = "new-check"
++        self.assert_rejected(mutate, "grant", "grant")
++
++    def test_add_check_overlap(self):
++        args = fixture("grant", "grant")
++        repo = args[2]["repositories"]["pilot"]
++        repo["required_checks"]["new-check"] = {}
++        observed = args[3]["repositories"]["pilot"]
++        observed["tooling_digest"] = policy.tooling_digest(repo)
++        observed["effective_required_checks"] = copy.deepcopy(repo["required_checks"])
++        observed["checks"].append({**observed["checks"][0], "context": "new-check", "run_id": 2})
++        rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
++        rs["rules"][0]["required_status_checks"][0]["required_check"].append({"context": "new-check", "integration_id": 0})
++        args[4]["resource_changes"][1]["change"]["after"] = copy.deepcopy(rs)
++        policy.evaluate(*args, NOW)
++
++    def test_remove_old_after_overlap(self):
++        args = fixture("grant", "grant")
++        base_repo = args[0]["repositories"]["pilot"]
++        base_repo["required_checks"]["new-check"] = {}
++        args[1]["inventory_digest"] = policy.digest(policy.canonical(args[0]))
++        args[1]["repositories"]["pilot"]["tooling_digest"] = policy.tooling_digest(base_repo)
++        repo = args[2]["repositories"]["pilot"]
++        repo["required_checks"] = {"new-check": {}}
++        observed = args[3]["repositories"]["pilot"]
++        observed["tooling_digest"] = policy.tooling_digest(repo)
++        observed["effective_required_checks"] = {"new-check": {}}
++        observed["checks"][0]["context"] = "new-check"
++        rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
++        rs["rules"][0]["required_status_checks"][0]["required_check"][0]["context"] = "new-check"
++        args[4]["resource_changes"][1]["change"]["after"] = copy.deepcopy(rs)
++        policy.evaluate(*args, NOW)
++
++    def test_snapshot_binding(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            (root / "main.tf").write_text("original")
++            first = policy.tree_digest(root)
++            (root / "main.tf").write_text("substitution")
++            self.assertNotEqual(first, policy.tree_digest(root))
++
++    def test_snapshot_symlinks(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            (root / "link").symlink_to("/etc/passwd")
++            with self.assertRaises(policy.PolicyError):
++                policy.tree_digest(root)
++
++    def test_duplicate_json_keys(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "input.json"
++            path.write_text('{"stage":"create","stage":"grant"}')
++            with self.assertRaises(policy.PolicyError):
++                policy.load_json(path)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/automation/repository-policy/test_receipt.py b/automation/repository-policy/test_receipt.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_receipt.py
+@@ -0,0 +1,128 @@
++import copy
++import importlib.util
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import unittest
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent
++spec = importlib.util.spec_from_file_location("verify", HERE / "verify_receipt.py")
++verify = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(verify)
++spec = importlib.util.spec_from_file_location("fixtures", HERE / "test_policy.py")
++fixtures = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(fixtures)
++
++
++class ReceiptTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.config = self.root / "candidate"
++        self.config.mkdir()
++        self.now = datetime.now(timezone.utc)
++        base, record, candidate, evidence, plan = fixtures.fixture()
++        evidence["repositories"]["pilot"]["observed_at"] = self.now.isoformat()
++        for name, value in (("base", base), ("record", record), ("evidence", evidence), ("plan", plan)):
++            (self.root / (name + ".json")).write_text(json.dumps(value))
++        (self.config / "repositories.json").write_text(json.dumps(candidate))
++        (self.config / "main.tf").write_text("# Offline fixture snapshot\n")
++        self.saved = self.root / "saved.tfplan"
++        self.saved.write_bytes(b"OFFLINE FIXTURE: not a Terraform saved plan")
++        self.plan = self.root / "plan.json"
++        self.receipt = self.root / "receipt.json"
++        self.args = [sys.executable, "-I", str(HERE / "policy.py"),
++                     "--base", str(self.root / "base.json"),
++                     "--record", str(self.root / "record.json"),
++                     "--candidate", str(self.config / "repositories.json"),
++                     "--evidence", str(self.root / "evidence.json"),
++                     "--plan-json", str(self.plan), "--saved-plan", str(self.saved),
++                     "--configuration", str(self.config), "--receipt", str(self.receipt),
++                     "--configuration-sha", "a"*40, "--policy-sha", "b"*40, "--base-sha", "1"*40]
++        self.run_policy()
++
++    def run_policy(self):
++        result = subprocess.run(self.args, cwd=self.config, capture_output=True, text=True, check=False)
++        self.assertEqual(result.returncode, 0, result.stderr)
++
++    def check_binding(self, receipt=None):
++        receipt = receipt or json.loads(self.receipt.read_text())
++        trusted_inputs = {key: json.loads((self.root / (filename + ".json")).read_text()) for key, filename in (("base", "base"), ("record", "record"), ("evidence", "evidence"), ("plan-json", "plan"))}
++        trusted_inputs["candidate"] = json.loads((self.config / "repositories.json").read_text())
++        verify.verify(receipt, self.config, self.saved, self.plan, HERE / "policy.py", self.now + timedelta(seconds=1), trusted_inputs, "a"*40, "b"*40, "1"*40)
++
++    def test_exact_binding(self):
++        self.check_binding()
++        self.assertIs(json.loads(self.receipt.read_text())["deployment_authorized"], False)
++
++    def test_configuration_substitution(self):
++        (self.config / "main.tf").write_text("different")
++        with self.assertRaises(ValueError):
++            self.check_binding()
++
++    def test_saved_plan_substitution(self):
++        self.saved.write_bytes(b"other plan")
++        with self.assertRaises(ValueError):
++            self.check_binding()
++
++    def test_json_plan_substitution(self):
++        self.plan.write_text("{}")
++        with self.assertRaises(ValueError):
++            self.check_binding()
++
++    def test_cannot_authorize_deployment(self):
++        receipt = json.loads(self.receipt.read_text())
++        receipt["deployment_authorized"] = True
++        with self.assertRaises(ValueError):
++            self.check_binding(receipt)
++
++    def test_expired_receipt(self):
++        receipt = json.loads(self.receipt.read_text())
++        receipt["evaluated_at"] = (self.now - timedelta(hours=25)).isoformat()
++        with self.assertRaises(ValueError):
++            self.check_binding(receipt)
++
++    def test_new_deployment_record_invalidates_rerun(self):
++        path = self.root / "record.json"
++        record = json.loads(path.read_text())
++        record["repositories"]["pilot"]["stage"] = "grant"
++        path.write_text(json.dumps(record))
++        with self.assertRaises(ValueError):
++            self.check_binding()
++
++    def test_new_evidence_invalidates_receipt(self):
++        path = self.root / "evidence.json"
++        evidence = json.loads(path.read_text())
++        evidence["repositories"]["pilot"]["checks"][0]["conclusion"] = "failure"
++        path.write_text(json.dumps(evidence))
++        with self.assertRaises(ValueError):
++            self.check_binding()
++
++    def test_candidate_python_never_executes(self):
++        sentinel = self.root / "executed"
++        (self.config / "policy.py").write_text(f"open({str(sentinel)!r}, 'w').write('executed')")
++        (self.config / "json.py").write_text(f"open({str(sentinel)!r}, 'w').write('executed')")
++        # Isolation excludes the cwd and PYTHONPATH from trusted imports.
++        result = subprocess.run(self.args, cwd=self.config,
++                                env={**os.environ, "PYTHONPATH": str(self.config)},
++                                capture_output=True, text=True, check=False)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertFalse(sentinel.exists())
++
++    def test_failure_has_nonzero_exit_and_no_new_receipt(self):
++        bad = json.loads((self.root / "evidence.json").read_text())
++        bad["repositories"] = {}
++        (self.root / "evidence.json").write_text(json.dumps(bad))
++        self.receipt.unlink()
++        result = subprocess.run(self.args, capture_output=True, check=False)
++        self.assertNotEqual(result.returncode, 0)
++        self.assertFalse(self.receipt.exists())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/automation/repository-policy/verify_receipt.py b/automation/repository-policy/verify_receipt.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/verify_receipt.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python3
++"""Recheck an OFFLINE receipt binding; never authorizes deployment."""
++import argparse
++import importlib.util
++import sys
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++spec = importlib.util.spec_from_file_location("policy", Path(__file__).with_name("policy.py"))
++policy = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(policy)
++
++
++def verify(receipt, configuration, saved_plan, plan_json, policy_file, now, trusted_inputs, configuration_sha, policy_sha, base_sha):
++    policy.require(receipt.get("schema_version") == 1 and receipt.get("result") == "pass" and receipt.get("mode") == "offline-fixture" and receipt.get("deployment_authorized") is False, "Unsupported or falsely authorized receipt")
++    expected = {
++        "configuration_digest": policy.tree_digest(configuration),
++        "saved_plan_digest": policy.digest(Path(saved_plan).read_bytes()),
++        "plan_json_digest": policy.digest(Path(plan_json).read_bytes()),
++        "policy_implementation_digest": policy.digest(Path(policy_file).read_bytes()),
++    }
++    policy.require(all(receipt.get(key) == value for key, value in expected.items()), "Receipt binding mismatch")
++    policy.require(receipt.get("configuration_sha") == configuration_sha and receipt.get("policy_sha") == policy_sha, "Receipt revision mismatch")
++    policy.require(receipt.get("base_sha") == base_sha and trusted_inputs["record"].get("configuration_sha") == base_sha, "Accepted base revision changed")
++    policy.require(receipt.get("input_digests") == {key: policy.digest(policy.canonical(value)) for key, value in trusted_inputs.items()}, "Trusted inputs changed since evaluation")
++    age = now - policy.timestamp(receipt.get("evaluated_at", ""))
++    policy.require(timedelta(0) <= age <= policy.FRESHNESS, "Expired policy receipt")
++    policy.evaluate(trusted_inputs["base"], trusted_inputs["record"], trusted_inputs["candidate"], trusted_inputs["evidence"], trusted_inputs["plan-json"], now)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    for arg in ("receipt", "configuration", "saved-plan", "plan-json", "base", "base-sha", "record", "evidence", "configuration-sha", "policy-sha"):
++        parser.add_argument("--" + arg, required=True)
++    args = parser.parse_args()
++    try:
++        trusted_inputs = {key: policy.load_json(getattr(args, key.replace("-", "_"))) for key in ("base", "record", "evidence", "plan-json")}
++        trusted_inputs["candidate"] = policy.load_json(Path(args.configuration) / "repositories.json")
++        verify(policy.load_json(args.receipt), args.configuration, args.saved_plan, args.plan_json,
++               Path(__file__).with_name("policy.py"), datetime.now(timezone.utc), trusted_inputs,
++               args.configuration_sha, args.policy_sha, args.base_sha)
++        print("Offline binding verified. Deployment remains unauthorized.")
++        return 0
++    except (ValueError, TypeError, KeyError, OSError) as error:
++        print("Receipt verification failed: " + (str(error) if isinstance(error, policy.PolicyError) else type(error).__name__), file=sys.stderr)
++        return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/hooks/repository_hygiene.py b/hooks/repository_hygiene.py
+new file mode 100755
+--- /dev/null
++++ b/hooks/repository_hygiene.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++"""Reject trailing whitespace and merge conflict markers without modifying files."""
++import sys
++from pathlib import Path
++
++
++def violations(text):
++    result = []
++    for number, line in enumerate(text.splitlines(), 1):
++        if line.rstrip(" \t") != line:
++            result.append((number, "trailing whitespace"))
++        if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
++            result.append((number, "merge conflict marker"))
++    return result
++
++
++def main(paths):
++    failed = False
++    for filename in paths:
++        path = Path(filename)
++        # Unified diffs intentionally contain whitespace-only context lines.
++        if path.is_symlink() or path.suffix in (".patch", ".diff"):
++            continue
++        try:
++            text = path.read_text(encoding="utf-8")
++        except UnicodeDecodeError:
++            continue
++        except OSError:
++            print("Cannot read hook input", file=sys.stderr)
++            return 1
++        for number, reason in violations(text):
++            print(f"{filename}:{number}: {reason}")
++            failed = True
++    return int(failed)
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/TERRAFORM.md b/TERRAFORM.md
+--- a/TERRAFORM.md
++++ b/TERRAFORM.md
+@@ -35,3 +35,40 @@
+ ## Validation
+ 
+ Run `actionlint` against both reusable workflows and the caller. Run `terraform fmt -check -recursive` and `terraform init -backend=false` followed by `terraform validate` in the caller. Live planning additionally verifies OIDC trust, backend access and provider credentials. Local YAML/shell checks do not establish those permissions. Never run an apply merely to test the pipeline.
++
++## Repository module validation and offline policy
++
++The existing terraform-plan.yml and terraform-deploy.yml contracts remain unchanged.
++The additions below do not enable deployment and do not supply credentials/backend.
++
++terraform-module-validate.yml provides credential-free fmt, backend-disabled init,
++validate, provider-mocked plan-only tests, shared hygiene, and a failing aggregate
++platform-ci job. Inputs: terraform-version, tooling-ref (same reviewed full SHA as
++the reusable workflow reference), optional working-directory. Do not pass cloud
++roles, provider administrative tokens, or secrets. Candidate validation remains
++separate from explicitly credentialed infrastructure plan/deploy.
++
++repository-hygiene.yml and the repository-hygiene pre-commit hook share a read-only
++Python implementation. go-validate.yml is the single language pilot; it requires
++go-version and tooling-ref, runs formatting/vet/race tests plus hygiene, and retains
++a failing aggregate gate. Observe actual reusable check contexts before enforcement.
++
++repository-policy-fixtures.yml runs trusted fixtures from a separately promoted
++full trusted-policy-ref. repository-policy.yml evaluates same-run artifact data in
++a separate job without Terraform execution. It checks out approved base and accepted
++record independently from candidate input. Its refs must be selected by the trusted
++caller/base; SHA syntax does not prove authorization. All current observations and
++receipts are OFFLINE ONLY and deployment_authorized is always false.
++
++Before any live repository deployment, integrate a trusted live observation and
++artifact collector and mandatory policy gates into the existing deployment path.
++Bind the exact saved binary plan, JSON generated from it, configuration snapshot/
++commit, accepted base/record, and policy revision. Recheck after environment approval
++and on manual/rerun paths. A partial apply requires a fresh plan and approval,
++not reuse of the old saved plan. Record advancement follows verified successful
++operations only. Existing artifact rerun behavior is preserved for other callers.
++
++Account capabilities, independent reviewers, credentials, backend and protected
++environments gate live rollout, not local validation. See automation/repository-policy/
++README.md for the offline input/receipt schema and the remaining live trust boundary.
++Codex review remains optional advisory follow-on, not the initial required gate.

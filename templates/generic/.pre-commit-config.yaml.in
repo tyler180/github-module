@@ -1,0 +1,5 @@
+repos:
+  - repo: https://github.com/tyler180/github-workflows
+    rev: '{{HOOK_SHA}}'
+    hooks:
+      - id: repository-hygiene

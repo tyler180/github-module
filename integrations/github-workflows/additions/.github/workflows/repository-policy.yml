@@ -1,0 +1,80 @@
+name: Reusable offline repository plan policy
+on:
+  workflow_call:
+    inputs:
+      trusted-policy-ref:
+        type: string
+        required: true
+      approved-base-ref:
+        type: string
+        required: true
+      accepted-record-ref:
+        type: string
+        required: true
+      configuration-sha:
+        type: string
+        required: true
+      artifact-id:
+        description: Same-run artifact containing candidate snapshot, plan.json, saved.tfplan, and offline observations.json.
+        type: number
+        required: true
+permissions:
+  contents: read
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate immutable revisions
+        env:
+          POLICY_REF: ${{ inputs.trusted-policy-ref }}
+          BASE_REF: ${{ inputs.approved-base-ref }}
+          RECORD_REF: ${{ inputs.accepted-record-ref }}
+          CONFIG_REF: ${{ inputs.configuration-sha }}
+        run: |
+          for revision in "$POLICY_REF" "$BASE_REF" "$RECORD_REF" "$CONFIG_REF"; do
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          done
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: tyler180/github-workflows
+          ref: ${{ inputs.trusted-policy-ref }}
+          path: trusted-policy
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.approved-base-ref }}
+          path: approved-base
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.accepted-record-ref }}
+          path: accepted-record
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ inputs.artifact-id }}
+          path: policy-input
+          merge-multiple: true
+      - name: Read-only policy; no candidate Terraform execution
+        env:
+          BASE_REF: ${{ inputs.approved-base-ref }}
+          CONFIG_REF: ${{ inputs.configuration-sha }}
+          POLICY_REF: ${{ inputs.trusted-policy-ref }}
+        run: |
+          python3 -I trusted-policy/automation/repository-policy/policy.py \
+            --base approved-base/repositories.json --base-sha "$BASE_REF" \
+            --record accepted-record/onboarding/accepted.json \
+            --candidate policy-input/candidate/repositories.json \
+            --evidence policy-input/observations.json \
+            --plan-json policy-input/plan.json --saved-plan policy-input/saved.tfplan \
+            --configuration policy-input/candidate --configuration-sha "$CONFIG_REF" \
+            --policy-sha "$POLICY_REF" --receipt offline-receipt.json
+      - name: Explicit authorization boundary
+        run: 'echo "This workflow produces offline bindings only; it cannot authorize deployment."'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repository-policy-offline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: offline-receipt.json
+          retention-days: 1
+          if-no-files-found: error

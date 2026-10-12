@@ -1,0 +1,12 @@
+name: CI
+on:
+  pull_request:
+  push:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  validation:
+    uses: tyler180/github-workflows/.github/workflows/repository-hygiene.yml@{{WORKFLOW_SHA}}
+    with:
+      tooling-ref: '{{WORKFLOW_SHA}}'
