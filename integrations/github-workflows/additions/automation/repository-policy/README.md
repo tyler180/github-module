@@ -15,7 +15,10 @@ Delivered adapters accept source=offline-fixture only. Every receipt includes
 deployment_authorized=false. Fake IDs, commits, and successes exist only in test
 fixtures. No live record, API collector, credentialed plan, apply gate, or approved
 record writer is enabled. repository-policy.yml reads same-run artifacts by ID in
-a separate unprivileged job; existing Terraform plan/deploy workflows are unchanged.
+a separate unprivileged job. The deployment workflow now requires that job for
+repository inventory roots, followed by an authorization job that rejects all
+fixture-only authorization. Live collector, record writer, and pre-apply live
+rechecks remain prerequisites before that block can be replaced.
 
 CLI required inputs:
 

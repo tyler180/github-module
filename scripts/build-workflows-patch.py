@@ -27,6 +27,17 @@ def main():
         blocks.append(f"diff --git a/{relative} b/{relative}\nnew file mode {'100755' if executable else '100644'}\n")
         blocks.extend(difflib.unified_diff([], source.read_text().splitlines(keepends=True),
                                          fromfile="/dev/null", tofile="b/" + relative))
+    for source in sorted((integration / "updates").rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(integration / "updates").as_posix()
+        target = checkout / relative
+        if not target.is_file():
+            raise ValueError("Update requires an existing baseline file: " + relative)
+        blocks.append(f"diff --git a/{relative} b/{relative}\n")
+        blocks.extend(difflib.unified_diff(target.read_text().splitlines(keepends=True),
+                                         source.read_text().splitlines(keepends=True),
+                                         fromfile="a/" + relative, tofile="b/" + relative))
     original = (checkout / "TERRAFORM.md").read_text()
     updated = original + (integration / "TERRAFORM-addendum.md").read_text()
     blocks.append("diff --git a/TERRAFORM.md b/TERRAFORM.md\n")

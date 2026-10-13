@@ -35,3 +35,18 @@ Account capabilities, independent reviewers, credentials, backend and protected
 environments gate live rollout, not local validation. See automation/repository-policy/
 README.md for the offline input/receipt schema and the remaining live trust boundary.
 Codex review remains optional advisory follow-on, not the initial required gate.
+
+## Repository inventory deployment gates (local integration)
+
+The shared deployment workflow now supports repository-policy-required and pinned
+policy/base/record revisions. Inventory roots containing repositories.json cannot
+disable this gate. Policy runs separately from candidate Terraform execution.
+Repository apply remains blocked because offline receipts cannot authorize it;
+independent live evidence and protected accepted-record integration must be
+implemented and tested before replacing the explicit authorization block. Ordinary
+non-inventory consumers retain their existing deployment path.
+
+Shared hygiene CI and local hooks now provide checksum-pinned Gitleaks 8.30.1
+secret detection. Local hooks require that version installed; CI rejects caller
+suppression files/comments and scans full fetched history with redacted output.
+Vulnerability scanning is separate future work.

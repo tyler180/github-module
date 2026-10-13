@@ -54,11 +54,180 @@ new file mode 100644
 +      HYGIENE_RESULT: ${{ needs.hygiene.result }}
 +    steps:
 +      - run: test "$RESULT" = success && test "$HYGIENE_RESULT" = success
+diff --git a/.github/workflows/repository-create-deploy.yml b/.github/workflows/repository-create-deploy.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/repository-create-deploy.yml
+@@ -0,0 +1,164 @@
++name: Deploy verified create-stage repository inventory
++on:
++  workflow_call:
++    inputs:
++      trusted-policy-ref:
++        type: string
++        required: true
++      apply-role-arn:
++        type: string
++        required: true
++      record-writer-role-arn:
++        type: string
++        required: true
++    secrets:
++      TF_GITHUB_PLAN_TOKEN:
++        required: true
++      TF_GITHUB_APPLY_TOKEN:
++        required: true
++permissions:
++  contents: read
++  id-token: write
++concurrency:
++  group: github-infra-repository-state
++  cancel-in-progress: false
++jobs:
++  plan:
++    if: github.repository == 'tyler180/github-infra' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
++    runs-on: ubuntu-latest
++    timeout-minutes: 20
++    outputs:
++      artifact-id: ${{ steps.upload.outputs.artifact-id }}
++    steps:
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          ref: ${{ github.sha }}
++          persist-credentials: false
++      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
++        with:
++          terraform_version: 1.15.8
++          terraform_wrapper: false
++      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
++        with:
++          role-to-assume: ${{ inputs.apply-role-arn }}
++          aws-region: us-west-2
++      - name: Plan with read-only GitHub credential
++        env:
++          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN }}
++          TF_IN_AUTOMATION: 'true'
++          TF_INPUT: 'false'
++        run: |
++          set -euo pipefail
++          test -n "$GITHUB_TOKEN"
++          terraform init -input=false -lockfile=readonly
++          terraform validate -no-color
++          terraform plan -input=false -lock-timeout=5m -no-color -out="$RUNNER_TEMP/saved.tfplan"
++      - id: upload
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: create-plan-${{ github.run_id }}-${{ github.run_attempt }}
++          path: ${{ runner.temp }}/saved.tfplan
++          retention-days: 1
++          if-no-files-found: error
++  deploy:
++    needs: plan
++    environment: production
++    runs-on: ubuntu-latest
++    timeout-minutes: 50
++    steps:
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          ref: ${{ github.sha }}
++          path: configuration
++          persist-credentials: false
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          repository: tyler180/github-workflows
++          ref: ${{ inputs.trusted-policy-ref }}
++          path: trusted-policy
++          persist-credentials: false
++      - name: Verify immutable release and resolve policy commit
++        id: policy-version
++        env:
++          GH_TOKEN: ${{ github.token }}
++          POLICY_REF: ${{ inputs.trusted-policy-ref }}
++        run: |
++          python3 -I trusted-policy/automation/repository-policy/release_ref.py \
++            --ref "$POLICY_REF" --checkout trusted-policy --output "$GITHUB_OUTPUT"
++      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
++        with:
++          artifact-ids: ${{ needs.plan.outputs.artifact-id }}
++          path: ${{ runner.temp }}/plan
++          merge-multiple: true
++      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
++        with:
++          terraform_version: 1.15.8
++          terraform_wrapper: false
++      - name: Decode saved plan independently using official providers
++        run: |
++          set -euo pipefail
++          mkdir "$RUNNER_TEMP/decoder"
++          cat > "$RUNNER_TEMP/decoder/providers.tf" <<'HCL'
++          terraform {
++            required_providers {
++              github = { source = "integrations/github", version = "= 6.13.0" }
++              aws = { source = "hashicorp/aws", version = "= 6.68.0" }
++            }
++          }
++          HCL
++          terraform -chdir="$RUNNER_TEMP/decoder" init -backend=false -input=false
++          terraform -chdir="$RUNNER_TEMP/decoder" show -json "$RUNNER_TEMP/plan/saved.tfplan" > "$RUNNER_TEMP/plan/plan.json"
++      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
++        with:
++          role-to-assume: ${{ inputs.apply-role-arn }}
++          aws-region: us-west-2
++      - name: Authorize exact plan after production approval
++        env:
++          GH_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN }}
++          SOURCE_SHA: ${{ github.sha }}
++          POLICY_SHA: ${{ steps.policy-version.outputs.sha }}
++          POLICY_VERSION: ${{ steps.policy-version.outputs.version }}
++        run: |
++          python3 -I trusted-policy/automation/repository-policy/live_create.py authorize \
++            --configuration configuration --sha "$SOURCE_SHA" \
++            --policy-sha "$POLICY_SHA" --policy-version "$POLICY_VERSION" \
++            --plan "$RUNNER_TEMP/plan/saved.tfplan" --plan-json "$RUNNER_TEMP/plan/plan.json" \
++            --receipt "$RUNNER_TEMP/plan/authorization.json"
++      - name: Apply authorized saved plan
++        working-directory: configuration
++        env:
++          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_APPLY_TOKEN }}
++          GH_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN }}
++          SOURCE_SHA: ${{ github.sha }}
++          POLICY_SHA: ${{ steps.policy-version.outputs.sha }}
++          POLICY_VERSION: ${{ steps.policy-version.outputs.version }}
++          TF_IN_AUTOMATION: 'true'
++          TF_INPUT: 'false'
++        run: |
++          set -euo pipefail
++          test -n "$GITHUB_TOKEN"
++          terraform init -input=false -lockfile=readonly
++          test "$(gh api repos/tyler180/github-infra/commits/main --jq '.sha')" = "$SOURCE_SHA"
++          python3 -I ../trusted-policy/automation/repository-policy/live_create.py recheck \
++            --configuration . --sha "$SOURCE_SHA" \
++            --policy-sha "$POLICY_SHA" --policy-version "$POLICY_VERSION" \
++            --plan "$RUNNER_TEMP/plan/saved.tfplan" --plan-json "$RUNNER_TEMP/plan/plan.json" \
++            --receipt "$RUNNER_TEMP/plan/authorization.json"
++          terraform apply -input=false -lock-timeout=5m -no-color "$RUNNER_TEMP/plan/saved.tfplan"
++      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
++        with:
++          role-to-assume: ${{ inputs.record-writer-role-arn }}
++          aws-region: us-west-2
++          unset-current-credentials: true
++      - name: Verify actual repositories and conditionally advance accepted record
++        env:
++          GH_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN }}
++          SOURCE_SHA: ${{ github.sha }}
++          POLICY_SHA: ${{ steps.policy-version.outputs.sha }}
++          POLICY_VERSION: ${{ steps.policy-version.outputs.version }}
++        run: |
++          python3 -I trusted-policy/automation/repository-policy/live_create.py accept \
++            --configuration configuration --sha "$SOURCE_SHA" \
++            --policy-sha "$POLICY_SHA" --policy-version "$POLICY_VERSION" \
++            --plan "$RUNNER_TEMP/plan/saved.tfplan" --plan-json "$RUNNER_TEMP/plan/plan.json" \
++            --receipt "$RUNNER_TEMP/plan/authorization.json"
 diff --git a/.github/workflows/repository-hygiene.yml b/.github/workflows/repository-hygiene.yml
 new file mode 100644
 --- /dev/null
 +++ b/.github/workflows/repository-hygiene.yml
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,71 @@
 +name: Reusable generic repository validation
 +on:
 +  workflow_call:
@@ -85,6 +254,7 @@ new file mode 100644
 +        with:
 +          persist-credentials: false
 +          path: candidate
++          fetch-depth: 0
 +      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 +        with:
 +          repository: tyler180/github-workflows
@@ -93,21 +263,121 @@ new file mode 100644
 +          path: trusted-tooling
 +      - name: Run shared read-only hygiene
 +        run: git -C candidate ls-files -z | xargs -0 -r -I '{}' python3 -I trusted-tooling/hooks/repository_hygiene.py 'candidate/{}'
++  secrets:
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          persist-credentials: false
++          fetch-depth: 0
++          path: candidate
++      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
++        with:
++          repository: tyler180/github-workflows
++          ref: ${{ inputs.tooling-ref }}
++          persist-credentials: false
++          path: trusted-tooling
++      - name: Install checksum-pinned scanner
++        run: |
++          set -euo pipefail
++          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks.tgz"
++          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
++          mkdir -p "$RUNNER_TEMP/scanner"
++          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/scanner" gitleaks
++          echo "$RUNNER_TEMP/scanner" >> "$GITHUB_PATH"
++      - name: Scan history with central rules and redacted output
++        run: python3 -I trusted-tooling/hooks/secret_scan.py candidate
 +  gate:
 +    name: platform-ci
-+    needs: validate
++    needs: [validate, secrets]
 +    if: always()
 +    runs-on: ubuntu-latest
 +    timeout-minutes: 2
 +    env:
 +      RESULT: ${{ needs.validate.result }}
++      SECRET_RESULT: ${{ needs.secrets.result }}
 +    steps:
-+      - run: test "$RESULT" = success
++      - run: test "$RESULT" = success && test "$SECRET_RESULT" = success
+diff --git a/.github/workflows/repository-live-access.yml b/.github/workflows/repository-live-access.yml
+new file mode 100644
+--- /dev/null
++++ b/.github/workflows/repository-live-access.yml
+@@ -0,0 +1,69 @@
++name: Verify repository deployment access
++on:
++  workflow_call:
++    inputs:
++      apply-role-arn:
++        type: string
++        required: true
++      record-writer-role-arn:
++        type: string
++        required: true
++    secrets:
++      TF_GITHUB_PLAN_TOKEN:
++        required: true
++      TF_GITHUB_APPLY_TOKEN:
++        required: true
++permissions:
++  contents: read
++  id-token: write
++jobs:
++  verify:
++    environment: production
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - name: Verify GitHub credentials without mutations
++        env:
++          PLAN_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN }}
++          APPLY_TOKEN: ${{ secrets.TF_GITHUB_APPLY_TOKEN }}
++        run: |
++          set -euo pipefail
++          test -n "$PLAN_TOKEN" && test -n "$APPLY_TOKEN"
++          for credential in "$PLAN_TOKEN" "$APPLY_TOKEN"; do
++            GH_TOKEN="$credential" gh api repos/tyler180/github-infra --jq '.id' | grep -qx 1339004765
++          done
++          echo 'Both credentials can read the configuration repository; write capabilities require the later approved pilot.'
++      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
++        with:
++          role-to-assume: ${{ inputs.record-writer-role-arn }}
++          aws-region: us-west-2
++          role-session-name: record-access-${{ github.run_id }}
++      - name: Verify record writer with a disposable probe
++        env:
++          RECORD_ROLE: ${{ inputs.record-writer-role-arn }}
++        run: |
++          set -euo pipefail
++          test "$(aws sts get-caller-identity --query Arn --output text)" = "arn:aws:sts::138013422358:assumed-role/${RECORD_ROLE##*/}/record-access-$GITHUB_RUN_ID"
++          key="github/github-infra/onboarding/access-tests/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
++          printf '{"purpose":"access-test","run_id":"%s"}\n' "$GITHUB_RUN_ID" > "$RUNNER_TEMP/probe.json"
++          aws s3api put-object --bucket 749rmw-tf-backends --key "$key" --body "$RUNNER_TEMP/probe.json" --if-none-match '*' > /dev/null
++          aws s3api get-object --bucket 749rmw-tf-backends --key "$key" "$RUNNER_TEMP/readback.json" > /dev/null
++          cmp "$RUNNER_TEMP/probe.json" "$RUNNER_TEMP/readback.json"
++          echo 'Record writer can write and read its prefix. The probe is retained; this role has no delete permission.'
++      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
++        with:
++          role-to-assume: ${{ inputs.apply-role-arn }}
++          aws-region: us-west-2
++          unset-current-credentials: true
++          role-session-name: deploy-access-${{ github.run_id }}
++      - name: Verify shared role cannot write records
++        run: |
++          set -euo pipefail
++          key="github/github-infra/onboarding/access-tests/denied-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
++          if aws s3api put-object --bucket 749rmw-tf-backends --key "$key" --body "$RUNNER_TEMP/probe.json" > /dev/null 2> "$RUNNER_TEMP/denial.txt"; then
++            echo 'Shared role unexpectedly wrote an onboarding record.' >&2
++            exit 1
++          fi
++          grep -q 'AccessDenied' "$RUNNER_TEMP/denial.txt" || { echo 'Write failed for a reason other than access denial.' >&2; exit 1; }
++          aws s3api list-objects-v2 --bucket 749rmw-tf-backends --prefix github/github-infra.tfstate --max-keys 1 > /dev/null
++          echo 'Shared role can list the backend prefix and is denied record writes.'
 diff --git a/.github/workflows/repository-policy-fixtures.yml b/.github/workflows/repository-policy-fixtures.yml
 new file mode 100644
 --- /dev/null
 +++ b/.github/workflows/repository-policy-fixtures.yml
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,42 @@
 +name: Reusable repository policy fixtures
 +on:
 +  workflow_call:
@@ -138,6 +408,18 @@ new file mode 100644
 +        run: python3 -I automation/repository-policy/test_policy.py
 +      - run: python3 -I trusted-policy/automation/repository-policy/test_receipt.py
 +      - run: python3 -I trusted-policy/automation/repository-policy/test_hygiene.py
++      - name: Install checksum-pinned scanner
++        run: |
++          set -euo pipefail
++          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o "$RUNNER_TEMP/gitleaks.tgz"
++          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
++          mkdir -p "$RUNNER_TEMP/scanner"
++          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP/scanner" gitleaks
++          echo "$RUNNER_TEMP/scanner" >> "$GITHUB_PATH"
++      - name: Install pinned test parser
++        run: python3 -m pip install -r trusted-policy/automation/repository-policy/requirements-test.txt
++      - run: python3 -I trusted-policy/automation/repository-policy/test_secret_scan.py
++      - run: python3 -I trusted-policy/automation/repository-policy/test_deployment_workflow.py
 diff --git a/.github/workflows/repository-policy.yml b/.github/workflows/repository-policy.yml
 new file mode 100644
 --- /dev/null
@@ -293,17 +575,23 @@ diff --git a/.pre-commit-hooks.yaml b/.pre-commit-hooks.yaml
 new file mode 100644
 --- /dev/null
 +++ b/.pre-commit-hooks.yaml
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,11 @@
 +- id: repository-hygiene
 +  name: Repository hygiene
 +  entry: hooks/repository_hygiene.py
 +  language: script
 +  types: [text]
++- id: secret-scan
++  name: Secret detection (Gitleaks 8.30.1)
++  entry: hooks/secret_scan.py --staged
++  language: script
++  pass_filenames: false
++  always_run: true
 diff --git a/automation/repository-policy/README.md b/automation/repository-policy/README.md
 new file mode 100644
 --- /dev/null
 +++ b/automation/repository-policy/README.md
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,63 @@
 +# Trusted repository policy (local-only)
 +
 +policy.py is a standard-library validator. It reads JSON; it never runs Terraform,
@@ -321,7 +609,10 @@ new file mode 100644
 +deployment_authorized=false. Fake IDs, commits, and successes exist only in test
 +fixtures. No live record, API collector, credentialed plan, apply gate, or approved
 +record writer is enabled. repository-policy.yml reads same-run artifacts by ID in
-+a separate unprivileged job; existing Terraform plan/deploy workflows are unchanged.
++a separate unprivileged job. The deployment workflow now requires that job for
++repository inventory roots, followed by an authorization job that rejects all
++fixture-only authorization. Live collector, record writer, and pre-apply live
++rechecks remain prerequisites before that block can be replaced.
 +
 +CLI required inputs:
 +
@@ -364,11 +655,173 @@ new file mode 100644
 +
 +Run test_policy.py, test_receipt.py, and test_hygiene.py with python3 -I. No third
 +party packages, live credentials, backend, or successful live evidence are needed.
+diff --git a/automation/repository-policy/live_create.py b/automation/repository-policy/live_create.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/live_create.py
+@@ -0,0 +1,157 @@
++"""Restricted live create-stage authorizer. Later onboarding stages are rejected."""
++import argparse
++from datetime import datetime, timezone
++import json
++from pathlib import Path
++import subprocess
++import sys
++import importlib.util
++_spec = importlib.util.spec_from_file_location("policy", Path(__file__).with_name("policy.py"))
++policy = importlib.util.module_from_spec(_spec)
++_spec.loader.exec_module(policy)
++
++BUCKET = '749rmw-tf-backends'
++KEY = 'github/github-infra/onboarding/accepted.json'
++OWNER = 'tyler180'
++
++
++def command(args):
++    result = subprocess.run(args, capture_output=True)
++    policy.require(result.returncode == 0, 'Trusted service operation failed')
++    return result.stdout
++
++
++def read_record(directory):
++    target = directory / 'accepted.json'
++    result = subprocess.run(['aws', 's3api', 'get-object', '--bucket', BUCKET,
++                             '--key', KEY, str(target)], capture_output=True)
++    if result.returncode:
++        policy.require(b'NoSuchKey' in result.stderr, 'Cannot read accepted record')
++        return None, None
++    metadata = json.loads(result.stdout)
++    return policy.load_json(target), metadata['ETag']
++
++
++def validate_scope(inventory):
++    repos = policy.inventories(inventory)
++    policy.require(bool(repos), 'Empty live inventory')
++    for repo in repos.values():
++        policy.require(repo['stage'] == 'create', 'Live adapter supports create stage only')
++        policy.require(not repo.get('provisioning_teams') and not repo.get('developer_teams'), 'Personal pilot cannot grant teams')
++        policy.require(repo.get('actions_policy') is None and repo.get('workflow_permissions') is None,
++                       'Optional Actions policies require later live acceptance')
++    return repos
++
++
++def verify_environment():
++    env = json.loads(command(['gh', 'api', 'repos/tyler180/github-infra/environments/production']))
++    rules = json.loads(command(['gh', 'api', 'repos/tyler180/github-infra/environments/production/deployment-branch-policies']))
++    policy.require(env.get('can_admins_bypass') is False, 'Administrator bypass is enabled')
++    reviews = [r for r in env.get('protection_rules', []) if r['type'] == 'required_reviewers']
++    policy.require(len(reviews) == 1 and any(r['reviewer']['id'] == 15354990 for r in reviews[0]['reviewers']), 'Required pilot reviewer missing')
++    policy.require([(r['name'], r['type']) for r in rules['branch_policies']] == [('main', 'branch')], 'Production is not main-only')
++
++
++def validate_inputs(candidate, plan, record):
++    repos = validate_scope(candidate)
++    if record is None:
++        base = {'schema_version': 1, 'repositories': {}}
++        record = {'schema_version': 1, 'configuration_sha': '0'*40,
++                  'inventory_digest': policy.digest(policy.canonical(base)), 'repositories': {}}
++    else:
++        base = record['inventory']
++        validate_scope(base)
++    for change in plan.get('resource_changes', []):
++        if change.get('type') == 'github_repository':
++            key = policy.repo_key(change)
++            policy.require(key in base['repositories'] or change['change']['actions'] == ['create'], 'Unrecorded repository cannot be adopted')
++    policy.evaluate(base, record, candidate, {'schema_version': 1, 'repositories': {}}, plan, datetime.now(timezone.utc))
++    # No candidate provisioners or executable external data are accepted.
++    def inspect(value):
++        if isinstance(value, dict):
++            policy.require(not value.get('provisioners'), 'Provisioners are prohibited')
++            for child in value.values():
++                inspect(child)
++        elif isinstance(value, list):
++            for child in value:
++                inspect(child)
++    inspect(plan.get('configuration', {}))
++    return repos
++
++
++def verify_repositories(repos):
++    accepted = {}
++    for key, repo in repos.items():
++        actual = json.loads(command(['gh', 'api', f'repos/{OWNER}/{repo["name"]}']))
++        expected = {
++            'name': repo['name'], 'visibility': repo.get('visibility', 'private'),
++            'description': repo.get('description', ''), 'homepage': repo.get('homepage_url', ''),
++            'archived': False, 'delete_branch_on_merge': repo.get('delete_branch_on_merge', True),
++            'allow_auto_merge': repo.get('allow_auto_merge', False),
++            'allow_update_branch': repo.get('allow_update_branch', True),
++        }
++        methods = repo.get('merge_methods', ['squash'])
++        expected.update({f'allow_{m}_merge' if m != 'merge' else 'allow_merge_commit': m in methods for m in ('merge', 'squash', 'rebase')})
++        features = repo.get('features', {})
++        expected.update({'has_'+name: features.get(name, default) for name, default in [('issues', True), ('discussions', False), ('wiki', False), ('projects', False)]})
++        policy.require(all((actual.get(k) or '' if k in ('description','homepage') else actual.get(k)) == v for k,v in expected.items()), 'Post-apply settings differ')
++        policy.require(actual['owner']['id'] == 15354990 and actual['default_branch'] == repo.get('default_branch', 'main'), 'Post-apply owner/branch differs')
++        policy.require(sorted(actual.get('topics', [])) == sorted(repo.get('topics', [])), 'Post-apply topics differ')
++        accepted[key] = {'name': repo['name'], 'stage': 'create', 'repository_id': actual['id'], 'tooling_digest': policy.tooling_digest(repo)}
++    return accepted
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument('mode', choices=['authorize', 'recheck', 'accept'])
++    p.add_argument('--configuration', required=True)
++    p.add_argument('--sha', required=True)
++    p.add_argument('--policy-sha', required=True)
++    p.add_argument('--policy-version', required=True)
++    p.add_argument('--plan', required=True)
++    p.add_argument('--plan-json', required=True)
++    p.add_argument('--receipt', required=True)
++    args = p.parse_args()
++    try:
++        policy.require(policy.SHA.fullmatch(args.sha) and policy.SHA.fullmatch(args.policy_sha), 'Full configuration revision required')
++        latest = command(['gh','api','repos/tyler180/github-infra/commits/main','--jq','.sha']).decode().strip()
++        policy.require(latest == args.sha, 'Configuration superseded')
++        verify_environment()
++        config = Path(args.configuration).resolve()
++        candidate = policy.load_json(config/'repositories.json')
++        plan = policy.load_json(args.plan_json)
++        receipt_path = Path(args.receipt)
++        record, etag = read_record(receipt_path.parent)
++        repos = validate_inputs(candidate, plan, record)
++        binding = {'policy_sha':args.policy_sha, 'policy_version':args.policy_version, 'configuration_sha': args.sha, 'configuration_digest': policy.tree_digest(config),
++                   'saved_plan_digest': policy.digest(Path(args.plan).read_bytes()),
++                   'plan_digest': policy.digest(policy.canonical(plan)), 'record_etag': etag}
++        if args.mode == 'authorize':
++            binding.update(mode='live-create', evaluated_at=datetime.now(timezone.utc).isoformat())
++            receipt_path.write_text(json.dumps(binding))
++        else:
++            receipt = policy.load_json(receipt_path)
++            policy.require(receipt.get('mode') == 'live-create' and all(receipt.get(k) == v for k,v in binding.items()), 'Authorization binding changed')
++            age = (datetime.now(timezone.utc)-datetime.fromisoformat(receipt['evaluated_at'])).total_seconds()
++            policy.require(0 <= age <= 3600, 'Authorization expired')
++            if args.mode == 'recheck':
++                print('Authorization remains current.')
++                return 0
++            entries = verify_repositories(repos)
++            if record:
++                policy.require(all(entries[k]['repository_id'] == v['repository_id'] for k,v in record['repositories'].items()), 'Accepted repository identity changed')
++            next_record = {'schema_version':1, 'configuration_sha':args.sha, 'inventory':candidate,
++                           'inventory_digest':policy.digest(policy.canonical(candidate)), 'repositories':entries,
++                           'accepted_at':datetime.now(timezone.utc).isoformat(), 'authorization':receipt}
++            output = receipt_path.parent/'next-record.json'
++            output.write_text(json.dumps(next_record))
++            command(['aws','s3api','put-object','--bucket',BUCKET,'--key',KEY,'--body',str(output),
++                     *(['--if-match',etag] if etag else ['--if-none-match','*'])])
++        print('Live create-stage '+args.mode+' succeeded.')
++        return 0
++    except (policy.PolicyError, KeyError, ValueError, OSError, TypeError):
++        print('Live create-stage validation failed; accepted record not advanced.', file=sys.stderr)
++        return 1
++
++if __name__ == '__main__':
++    sys.exit(main())
 diff --git a/automation/repository-policy/policy.py b/automation/repository-policy/policy.py
 new file mode 100644
 --- /dev/null
 +++ b/automation/repository-policy/policy.py
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,413 @@
 +#!/usr/bin/env python3
 +"""Read-only, dependency-free policy evaluation. Never executes candidate code.
 +
@@ -489,7 +942,7 @@ new file mode 100644
 +    return parsed
 +
 +
-+def observations(repo, prior, observed, now, needs_protection):
++def observations(repo, prior, observed, now, needs_protection, protected_checks=None):
 +    require(isinstance(observed, dict), "Missing independently supplied observation")
 +    require(observed.get("source") == "offline-fixture", "Only clearly marked offline observations are supported locally")
 +    require(SHA.fullmatch(observed.get("head_sha", "")), "Missing observed content commit")
@@ -508,7 +961,7 @@ new file mode 100644
 +    if needs_protection:
 +        for flag in ("protection_active", "codeowner_review_required", "force_push_blocked", "deletion_blocked", "dummy_substitution_review_blocked", "untrusted_push_blocked"):
 +            require(observed.get(flag) is True, "Protection observation failed: " + flag)
-+        require(normalize_checks(observed.get("effective_required_checks", {})) == normalize_checks(repo.get("required_checks", {})), "Effective checks differ from verified contract")
++        require(normalize_checks(observed.get("effective_required_checks", {})) == normalize_checks(repo.get("required_checks", {}) if protected_checks is None else protected_checks), "Effective checks differ from accepted protection baseline")
 +
 +
 +def validate_transition(base, record, candidate, evidence, now):
@@ -535,14 +988,18 @@ new file mode 100644
 +        require(repo.get("initialization", "basic") == old.get("initialization", "basic") and repo.get("template") == old.get("template"), "Creation intent cannot change")
 +        changed = tooling_digest(repo) != tooling_digest(old)
 +        if repo["stage"] != "create":
-+            # At grant stage, changed tooling is evaluated in a content PR first;
-+            # the root may not alter enforcement until effective checks match.
++            # Before apply, live enforcement must match the accepted baseline.
++            # Candidate checks are validated above; post-apply collection must
++            # verify the candidate contract before accepting the new record.
 +            observations(repo, accepted, evidence.get("repositories", {}).get(key), now,
-+                         needs_protection=(repo["stage"] == "grant"))
++                         needs_protection=(old["stage"] in ("protect", "grant")),
++                         protected_checks=old.get("required_checks", {}))
 +        if old["stage"] in ("protect", "grant"):
-+            removed = set(old.get("required_checks", {})) - set(repo.get("required_checks", {}))
-+            if removed:
-+                retained = set(old.get("required_checks", {})) & set(repo.get("required_checks", {}))
++            old_checks = normalize_checks(old.get("required_checks", {}))
++            new_checks = normalize_checks(repo.get("required_checks", {}))
++            if old_checks != new_checks:
++                retained = [context for context in old_checks
++                            if context in new_checks and old_checks[context] == new_checks[context]]
 +                require(retained, "Check migration requires verified overlap")
 +        if changed and old["stage"] == "grant":
 +            require(repo["stage"] == "grant", "Tooling updates must retain onboarding stage")
@@ -686,27 +1143,30 @@ new file mode 100644
 +        require(len(actual_teams) == len(teams) and actual_teams == expected_teams, "Premature or undeclared team grant")
 +        for r in teams:
 +            require(r["values"].get("repository") == repo["name"], "Team grant targets wrong repository")
-+        rs = one([r for r in items if r["type"] == "github_repository_ruleset"], "ruleset")["values"]
-+        require(rs.get("repository") == repo["name"] and rs.get("target") == "branch", "Wrong ruleset target")
-+        require(not rs.get("bypass_actors"), "Root baseline does not permit bypass actors")
-+        condition = one(one(rs.get("conditions"), "conditions").get("ref_name"), "ref_name")
-+        require(condition.get("include") == ["~DEFAULT_BRANCH"] and condition.get("exclude") == [], "Protection scope changed")
-+        require(rs.get("enforcement") == ("active" if repo["stage"] in ("protect", "grant") else "disabled"), "Wrong ruleset enforcement")
-+        rules = one(rs.get("rules"), "rules")
-+        require(rules.get("deletion") is True and rules.get("non_fast_forward") is True, "Missing deletion/force-push protection")
-+        pr = one(rules.get("pull_request"), "pull request policy")
-+        require(pr.get("required_approving_review_count") == 1 and all(pr.get(flag) is True for flag in ("require_code_owner_review", "dismiss_stale_reviews_on_push", "require_last_push_approval", "required_review_thread_resolution")), "Review policy weakened or unknown")
-+        checks = repo.get("required_checks", {})
-+        status = rules.get("required_status_checks") or []
-+        if checks:
-+            status = one(status, "status policy")
-+            require(status.get("strict_required_status_checks_policy") is True, "Strict check policy missing")
-+            # SDK defaults omitted integration IDs to 0; this means no source
-+            # restriction, not an invented GitHub integration identity.
-+            actual = normalize_checks({c["context"]: {"integration_id": c.get("integration_id")} for c in status.get("required_check", [])})
-+            require(actual == normalize_checks(checks), "Planned check contract differs")
-+        else:
-+            require(not status, "Unexpected status policy")
++        rulesets = [r for r in items if r["type"] == "github_repository_ruleset"]
++        require(rulesets or repo["stage"] not in ("protect", "grant"), "Protected stages require a ruleset")
++        if rulesets:
++            rs = one(rulesets, "ruleset")["values"]
++            require(rs.get("repository") == repo["name"] and rs.get("target") == "branch", "Wrong ruleset target")
++            require(not rs.get("bypass_actors"), "Root baseline does not permit bypass actors")
++            condition = one(one(rs.get("conditions"), "conditions").get("ref_name"), "ref_name")
++            require(condition.get("include") == ["~DEFAULT_BRANCH"] and condition.get("exclude") == [], "Protection scope changed")
++            require(rs.get("enforcement") == ("active" if repo["stage"] in ("protect", "grant") else "disabled"), "Wrong ruleset enforcement")
++            rules = one(rs.get("rules"), "rules")
++            require(rules.get("deletion") is True and rules.get("non_fast_forward") is True, "Missing deletion/force-push protection")
++            pr = one(rules.get("pull_request"), "pull request policy")
++            require(pr.get("required_approving_review_count") == 1 and all(pr.get(flag) is True for flag in ("require_code_owner_review", "dismiss_stale_reviews_on_push", "require_last_push_approval", "required_review_thread_resolution")), "Review policy weakened or unknown")
++            checks = repo.get("required_checks", {})
++            status = rules.get("required_status_checks") or []
++            if checks:
++                status = one(status, "status policy")
++                require(status.get("strict_required_status_checks_policy") is True, "Strict check policy missing")
++                # SDK defaults omitted integration IDs to 0; this means no source
++                # restriction, not an invented GitHub integration identity.
++                actual = normalize_checks({c["context"]: {"integration_id": c.get("integration_id")} for c in status.get("required_check", [])})
++                require(actual == normalize_checks(checks), "Planned check contract differs")
++            else:
++                require(not status, "Unexpected status policy")
 +        for kind, field in (("github_actions_repository_permissions", "actions_policy"), ("github_workflow_repository_permissions", "workflow_permissions"), ("github_branch_default", "default_branch")):
 +            matches = [r for r in items if r["type"] == kind]
 +            configured = repo.get(field)
@@ -720,7 +1180,13 @@ new file mode 100644
 +                    require(all(value.get(k) == configured[k] for k in ("default_workflow_permissions", "can_approve_pull_request_reviews")), "Workflow policy mismatch")
 +                else:
 +                    require(all(value.get(k) == configured[k] for k in ("enabled", "allowed_actions", "sha_pinning_required")), "Actions policy mismatch")
-+                    require((value.get("allowed_actions_config") or []) == ([configured["selected"]] if configured.get("selected") is not None else []), "Actions allowlist mismatch")
++                    actual_config = value.get("allowed_actions_config") or []
++                    expected_config = [configured["selected"]] if configured.get("selected") is not None else []
++                    # Provider and module schemas model patterns as a set.
++                    def normalize_allowlist(blocks):
++                        return [{**block, "patterns_allowed": sorted(set(block.get("patterns_allowed", [])))}
++                                for block in blocks]
++                    require(normalize_allowlist(actual_config) == normalize_allowlist(expected_config), "Actions allowlist mismatch")
 +
 +
 +def evaluate(base, record, candidate, evidence, plan, now):
@@ -769,6 +1235,189 @@ new file mode 100644
 +
 +if __name__ == "__main__":
 +    sys.exit(main())
+diff --git a/automation/repository-policy/release_ref.py b/automation/repository-policy/release_ref.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/release_ref.py
+@@ -0,0 +1,52 @@
++"""Resolve full SHAs or published immutable semantic-version releases."""
++import argparse
++import json
++from pathlib import Path
++import re
++import subprocess
++
++SHA = re.compile(r'[0-9a-f]{40}')
++VERSION = re.compile(r'v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?')
++REPO = 'tyler180/github-workflows'
++
++
++def run(args):
++    return subprocess.check_output(args, stderr=subprocess.DEVNULL).decode().strip()
++
++
++def resolve(ref, checkout):
++    if not (SHA.fullmatch(ref) or VERSION.fullmatch(ref)):
++        raise ValueError('Use a full SHA or an exact version release, not a branch or floating tag')
++    actual = run(['git', '-C', str(checkout), 'rev-parse', 'HEAD'])
++    if not SHA.fullmatch(actual):
++        raise ValueError('Invalid checkout revision')
++    if SHA.fullmatch(ref):
++        if ref != actual:
++            raise ValueError('Checkout does not match requested revision')
++        return actual
++    release = json.loads(run(['gh', 'api', f'repos/{REPO}/releases/tags/{ref}']))
++    if release.get('draft') is not False or release.get('immutable') is not True or release.get('tag_name') != ref:
++        raise ValueError('Version must be a published immutable release')
++    obj = json.loads(run(['gh', 'api', f'repos/{REPO}/git/ref/tags/{ref}']))['object']
++    for _ in range(4):
++        if obj['type'] != 'tag':
++            break
++        obj = json.loads(run(['gh', 'api', f'repos/{REPO}/git/tags/{obj["sha"]}']))['object']
++    if obj.get('type') != 'commit' or obj.get('sha') != actual:
++        raise ValueError('Release tag does not match checked-out policy')
++    return actual
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument('--ref', required=True)
++    p.add_argument('--checkout', required=True)
++    p.add_argument('--output', required=True)
++    args = p.parse_args()
++    sha = resolve(args.ref, args.checkout)
++    with Path(args.output).open('a') as output:
++        output.write(f'sha={sha}\nversion={args.ref}\n')
++    print('Trusted policy version resolved to its verified commit.')
++
++if __name__ == '__main__':
++    main()
+diff --git a/automation/repository-policy/requirements-test.txt b/automation/repository-policy/requirements-test.txt
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/requirements-test.txt
+@@ -0,0 +1 @@
++PyYAML==6.0.3
+diff --git a/automation/repository-policy/test_deployment_workflow.py b/automation/repository-policy/test_deployment_workflow.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_deployment_workflow.py
+@@ -0,0 +1,115 @@
++"""Exercise the apply condition and executable authorization/preflight gates."""
++from pathlib import Path
++import re
++import subprocess
++import tempfile
++import unittest
++import yaml
++
++SHARED_ROOT = Path(__file__).resolve().parents[2]
++WORKFLOW = SHARED_ROOT / '.github' / 'workflows' / 'terraform-deploy.yml'
++if not WORKFLOW.exists():
++    WORKFLOW = SHARED_ROOT.parent / 'updates' / '.github' / 'workflows' / 'terraform-deploy.yml'
++POLICY_WORKFLOW = SHARED_ROOT / '.github' / 'workflows' / 'repository-policy.yml'
++
++
++def load():
++    return yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
++
++
++def applies(required, authorization, changes='true', plan='success', cancelled=False):
++    # Evaluate the small trusted GitHub expression as a boolean truth table.
++    expression = load()['jobs']['apply']['if']
++    expression = re.sub(r'needs\.([\w-]+)\.outputs\.([\w-]+)', r"needs['\1']['outputs']['\2']", expression)
++    expression = re.sub(r'needs\.([\w-]+)\.result', r"needs['\1']['result']", expression)
++    expression = re.sub(r'inputs\.([\w-]+)', r"inputs['\1']", expression)
++    expression = expression.replace('&&', ' and ').replace('||', ' or ')
++    expression = re.sub(r'!(?!=)', 'not ', expression)
++    context = {'inputs': {'repository-policy-required': required},
++               'needs': {'plan': {'result': plan, 'outputs': {'changes': changes}},
++                         'repository-authorization': {'result': authorization}},
++               'always': lambda: True, 'cancelled': lambda: cancelled}
++    return eval(expression, {'__builtins__': {}}, context)
++
++
++class DeploymentTests(unittest.TestCase):
++    def test_existing_non_inventory_flow(self):
++        self.assertTrue(applies(False, 'skipped'))
++
++    def test_no_changes_never_apply(self):
++        for required in (True, False):
++            self.assertFalse(applies(required, 'success', changes='false'))
++
++    def test_required_gate_failure_skip_or_cancel_blocks_apply(self):
++        for result in ('failure', 'skipped', 'cancelled'):
++            with self.subTest(result=result):
++                self.assertFalse(applies(True, result))
++
++    def test_failed_plan_and_cancelled_runs_block_apply(self):
++        self.assertFalse(applies(True, 'success', plan='failure'))
++        self.assertFalse(applies(True, 'success', cancelled=True))
++
++    def test_fixture_authorization_always_fails(self):
++        step = load()['jobs']['repository-authorization']['steps'][0]
++        self.assertNotEqual(subprocess.run(['bash', '-c', step['run']], capture_output=True).returncode, 0)
++
++    def test_inventory_cannot_disable_policy(self):
++        steps = load()['jobs']['plan']['steps']
++        step = next(s for s in steps if s.get('name') == 'Require repository policy for inventory roots')
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            command = ['bash', '-c', step['run']]
++            self.assertEqual(subprocess.run(command, cwd=root, env={'POLICY_REQUIRED': 'false'}, capture_output=True).returncode, 0)
++            (root / 'repositories.json').write_text('{}')
++            self.assertNotEqual(subprocess.run(command, cwd=root, env={'POLICY_REQUIRED': 'false'}, capture_output=True).returncode, 0)
++            self.assertNotEqual(subprocess.run(command, cwd=root, env={'POLICY_REQUIRED': 'true'}, capture_output=True).returncode, 0)
++            self.assertEqual(subprocess.run(command, cwd=root, env={'POLICY_REQUIRED': 'true', 'POLICY_REF': 'a'*40, 'BASE_REF': 'b'*40, 'RECORD_REF': 'c'*40}, capture_output=True).returncode, 0)
++
++    def test_policy_is_isolated_and_required_dependency(self):
++        jobs = load()['jobs']
++        self.assertIn('repository-authorization', jobs['apply']['needs'])
++        self.assertEqual(jobs['repository-authorization']['needs'], 'repository-policy')
++        self.assertEqual(jobs['repository-policy']['permissions']['id-token'], 'none')
++        self.assertEqual(jobs['repository-policy']['uses'], './.github/workflows/repository-policy.yml')
++        self.assertNotIn('continue-on-error', jobs['repository-authorization'])
++        policy = yaml.load(POLICY_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
++        self.assertFalse(any('terraform' in s.get('uses', '') for s in policy['jobs']['policy']['steps']))
++
++    def test_environment_credential_is_confined_to_apply(self):
++        workflow = load()
++        jobs = workflow['jobs']
++        self.assertEqual(jobs['apply']['environment'], '${{ inputs.environment }}')
++        self.assertIn('secrets.TF_GITHUB_APPLY_TOKEN', jobs['apply']['env']['GITHUB_TOKEN'])
++        self.assertNotIn('TF_GITHUB_APPLY_TOKEN', str(jobs['plan']))
++        self.assertIn('TF_GITHUB_APPLY_TOKEN', workflow['on']['workflow_call']['secrets'])
++
++    def test_planning_uses_read_credential(self):
++        workflow = load()
++        self.assertEqual(workflow['env']['GITHUB_TOKEN'],
++                         '${{ secrets.TF_GITHUB_PLAN_TOKEN || secrets.terraform-github-token }}')
++        self.assertIn('TF_GITHUB_PLAN_TOKEN', workflow['on']['workflow_call']['secrets'])
++        step = next(s for s in workflow['jobs']['plan']['steps']
++                    if s.get('name') == 'Require repository planning credential')
++        self.assertEqual(step['if'], 'inputs.repository-policy-required')
++        result = subprocess.run(['bash', '-c', step['run']], env={'GITHUB_TOKEN': ''}, capture_output=True)
++        self.assertNotEqual(result.returncode, 0)
++
++    def test_missing_repository_apply_credential_fails(self):
++        step = next(s for s in load()['jobs']['apply']['steps']
++                    if s.get('name') == 'Require repository apply credential')
++        self.assertEqual(step['if'], 'inputs.repository-policy-required')
++        for token, expected in (('', False), ('synthetic-test-value', True)):
++            result = subprocess.run(['bash', '-c', step['run']],
++                                    env={'GITHUB_TOKEN': token}, capture_output=True)
++            self.assertEqual(result.returncode == 0, expected)
++            if token:
++                self.assertNotIn(token.encode(), result.stdout + result.stderr)
++
++    def test_manual_dispatch_uses_same_gates(self):
++        jobs = load()['jobs']
++        self.assertIn('workflow_dispatch', jobs['plan']['if'])
++        self.assertNotIn('event_name', jobs['apply']['if'])
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/automation/repository-policy/test_hygiene.py b/automation/repository-policy/test_hygiene.py
 new file mode 100644
 --- /dev/null
@@ -807,11 +1456,126 @@ new file mode 100644
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/automation/repository-policy/test_live_create.py b/automation/repository-policy/test_live_create.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_live_create.py
+@@ -0,0 +1,110 @@
++"""Live adapter unit tests use synthetic records and no credentials."""
++import copy
++import importlib.util
++from pathlib import Path
++import unittest
++from unittest.mock import patch
++from test_policy import fixture
++
++spec = importlib.util.spec_from_file_location('live', Path(__file__).with_name('live_create.py'))
++live = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(live)
++
++class LiveTests(unittest.TestCase):
++    def create_inputs(self):
++        args = fixture('create', 'create')
++        candidate, plan = args[2], args[-1]
++        repo = candidate['repositories']['pilot']
++        repo['provisioning_teams'] = {}; repo['developer_teams'] = {}
++        allowed = ('terraform_data', 'github_repository')
++        plan['resource_changes'][:] = [c for c in plan['resource_changes'] if c['type'] in allowed]
++        resources = plan['planned_values']['root_module']['child_modules'][0]['resources']
++        resources[:] = [r for r in resources if r['type'] == 'github_repository']
++        for c in plan['resource_changes']:
++            c['change']['actions'] = ['create']; c['change']['before'] = None
++        return candidate, plan
++
++    def test_first_create_is_accepted_without_record(self):
++        candidate, plan = self.create_inputs()
++        live.validate_inputs(candidate, plan, None)
++
++    def test_implicit_adoption_is_rejected(self):
++        candidate, plan = self.create_inputs()
++        next(c for c in plan['resource_changes'] if c['type']=='github_repository')['change']['actions'] = ['no-op']
++        with self.assertRaisesRegex(live.policy.PolicyError, 'cannot be adopted'):
++            live.validate_inputs(candidate, plan, None)
++
++    def test_provisioner_is_rejected(self):
++        candidate, plan = self.create_inputs()
++        plan['configuration'] = {'root_module':{'resources':[{'provisioners':[{'type':'local-exec'}]}]}}
++        with self.assertRaisesRegex(live.policy.PolicyError, 'Provisioners'):
++            live.validate_inputs(candidate, plan, None)
++
++    def test_record_missing_is_distinct_from_access_denied(self):
++        import subprocess
++        import tempfile
++        with tempfile.TemporaryDirectory() as directory:
++            for error, allowed in ((b'NoSuchKey',True),(b'AccessDenied',False)):
++                with patch.object(live.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,b'',error)):
++                    if allowed: self.assertEqual(live.read_record(Path(directory)),(None,None))
++                    else:
++                        with self.assertRaises(live.policy.PolicyError): live.read_record(Path(directory))
++
++    def test_changed_plan_blocks_record_advancement(self):
++        import json
++        import sys
++        import tempfile
++        with tempfile.TemporaryDirectory() as directory:
++            root=Path(directory); config=root/'config';config.mkdir()
++            candidate, plan=self.create_inputs()
++            (config/'repositories.json').write_text(json.dumps(candidate))
++            (root/'plan.json').write_text(json.dumps(plan));(root/'saved').write_bytes(b'original')
++            argv=['live_create.py','authorize','--configuration',str(config),'--sha','a'*40,
++                  '--policy-sha','b'*40,'--policy-version','v2.1.0-rc.2','--plan',str(root/'saved'),'--plan-json',str(root/'plan.json'),'--receipt',str(root/'receipt.json')]
++            with patch.object(sys,'argv',argv), patch.object(live,'verify_environment'), patch.object(live,'read_record',return_value=(None,None)), patch.object(live,'command',return_value=('a'*40).encode()):
++                self.assertEqual(live.main(),0)
++            (root/'saved').write_bytes(b'changed')
++            argv[1]='accept'
++            with patch.object(sys,'argv',argv), patch.object(live,'verify_environment'), patch.object(live,'read_record',return_value=(None,None)), patch.object(live,'command',return_value=('a'*40).encode()) as commands, patch.object(live,'verify_repositories') as verify:
++                self.assertEqual(live.main(),1)
++                verify.assert_not_called()
++                self.assertFalse(any(call.args[0][0]=='aws' for call in commands.call_args_list))
++
++    def test_later_stages_are_blocked(self):
++        for stage in ('bootstrap', 'verify', 'protect', 'grant'):
++            candidate = fixture('create', stage)[2]
++            with self.assertRaises(live.policy.PolicyError):
++                live.validate_scope(candidate)
++
++    def test_team_grants_are_blocked(self):
++        with self.assertRaises(live.policy.PolicyError):
++            live.validate_scope(fixture('create', 'create')[2])
++
++    def test_optional_actions_policy_is_blocked(self):
++        candidate = fixture('create', 'create')[2]
++        repo = candidate['repositories']['pilot']
++        repo['provisioning_teams'] = {}; repo['developer_teams'] = {}
++        repo['actions_policy'] = {'enabled': True}
++        with self.assertRaises(live.policy.PolicyError):
++            live.validate_scope(candidate)
++
++    def test_environment_requires_main_only(self):
++        import json
++        env = {'can_admins_bypass':False, 'protection_rules':[{'type':'required_reviewers','reviewers':[{'reviewer':{'id':15354990}}]}]}
++        rules = {'branch_policies':[{'name':'main','type':'branch'}]}
++        with patch.object(live, 'command', side_effect=[json.dumps(env).encode(),json.dumps(rules).encode()]):
++            live.verify_environment()
++        for change in ('bypass','reviewer','branch'):
++            badenv = copy.deepcopy(env); badrules = copy.deepcopy(rules)
++            if change == 'bypass': badenv['can_admins_bypass'] = True
++            if change == 'reviewer': badenv['protection_rules'] = []
++            if change == 'branch': badrules['branch_policies'].append({'name':'dev','type':'branch'})
++            with patch.object(live, 'command', side_effect=[json.dumps(badenv).encode(),json.dumps(badrules).encode()]):
++                with self.assertRaises(live.policy.PolicyError): live.verify_environment()
++
++    def test_service_failures_are_not_accepted(self):
++        import subprocess
++        with patch.object(live.subprocess, 'run', return_value=subprocess.CompletedProcess([],1,b'',b'failed')):
++            with self.assertRaises(live.policy.PolicyError): live.command(['synthetic'])
++
++if __name__ == '__main__': unittest.main()
 diff --git a/automation/repository-policy/test_policy.py b/automation/repository-policy/test_policy.py
 new file mode 100644
 --- /dev/null
 +++ b/automation/repository-policy/test_policy.py
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,372 @@
 +"""Offline adversarial fixtures; no assertion here represents live evidence."""
 +import copy
 +import importlib.util
@@ -907,6 +1671,23 @@ new file mode 100644
 +
 +
 +class PolicyTests(unittest.TestCase):
++    def test_unprotected_stage_may_omit_ruleset(self):
++        args = fixture("create", "create")
++        plan = args[-1]
++        plan['resource_changes'] = [c for c in plan['resource_changes'] if c['type'] != 'github_repository_ruleset']
++        resources = plan['planned_values']['root_module']['child_modules'][0]['resources']
++        resources[:] = [r for r in resources if r['type'] != 'github_repository_ruleset']
++        policy.evaluate(*args, NOW)
++
++    def test_protected_stage_cannot_omit_ruleset(self):
++        args = fixture()
++        plan = args[-1]
++        plan['resource_changes'] = [c for c in plan['resource_changes'] if c['type'] != 'github_repository_ruleset']
++        resources = plan['planned_values']['root_module']['child_modules'][0]['resources']
++        resources[:] = [r for r in resources if r['type'] != 'github_repository_ruleset']
++        with self.assertRaisesRegex(policy.PolicyError, 'Protected stages require a ruleset'):
++            policy.evaluate(*args, NOW)
++
 +    def assert_rejected(self, mutate, old="verify", stage="protect"):
 +        args = fixture(old, stage)
 +        mutate(*args)
@@ -1067,7 +1848,7 @@ new file mode 100644
 +        repo["required_checks"]["new-check"] = {}
 +        observed = args[3]["repositories"]["pilot"]
 +        observed["tooling_digest"] = policy.tooling_digest(repo)
-+        observed["effective_required_checks"] = copy.deepcopy(repo["required_checks"])
++        observed["effective_required_checks"] = copy.deepcopy(args[0]["repositories"]["pilot"]["required_checks"])
 +        observed["checks"].append({**observed["checks"][0], "context": "new-check", "run_id": 2})
 +        rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
 +        rs["rules"][0]["required_status_checks"][0]["required_check"].append({"context": "new-check", "integration_id": 0})
@@ -1084,12 +1865,63 @@ new file mode 100644
 +        repo["required_checks"] = {"new-check": {}}
 +        observed = args[3]["repositories"]["pilot"]
 +        observed["tooling_digest"] = policy.tooling_digest(repo)
-+        observed["effective_required_checks"] = {"new-check": {}}
++        observed["effective_required_checks"] = copy.deepcopy(base_repo["required_checks"])
 +        observed["checks"][0]["context"] = "new-check"
 +        rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
 +        rs["rules"][0]["required_status_checks"][0]["required_check"][0]["context"] = "new-check"
 +        args[4]["resource_changes"][1]["change"]["after"] = copy.deepcopy(rs)
 +        policy.evaluate(*args, NOW)
++
++
++    def test_live_checks_must_match_accepted_baseline(self):
++        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(
++            effective_required_checks={"unapproved-check": {}}), "grant", "grant")
++
++    def test_changed_integration_is_not_overlap(self):
++        args = fixture("grant", "grant")
++        repo = args[2]["repositories"]["pilot"]
++        repo["required_checks"]["platform-ci"] = {"integration_id": 99}
++        observed = args[3]["repositories"]["pilot"]
++        observed["tooling_digest"] = policy.tooling_digest(repo)
++        observed["checks"][0]["integration_id"] = 99
++        with self.assertRaisesRegex(policy.PolicyError, "verified overlap"):
++            policy.validate_transition(*args[:4], NOW)
++
++    def allowlist_fixture(self, patterns, planned_patterns):
++        args = fixture()
++        selected = {"github_owned_allowed": False, "verified_allowed": False,
++                    "patterns_allowed": patterns}
++        args[2]["repositories"]["pilot"]["actions_policy"] = {
++            "enabled": True, "allowed_actions": "selected", "sha_pinning_required": True,
++            "selected": selected}
++        value = {"repository": "offline-fixture", "enabled": True,
++                 "allowed_actions": "selected", "sha_pinning_required": True,
++                 "allowed_actions_config": [{**selected, "patterns_allowed": planned_patterns}]}
++        item = {"address": 'module.repositories["pilot"].github_actions_repository_permissions.this["managed"]',
++                "module_address": 'module.repositories["pilot"]', "mode": "managed",
++                "type": "github_actions_repository_permissions",
++                "provider_name": "registry.terraform.io/integrations/github", "values": value}
++        args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"].append(item)
++        args[4]["resource_changes"].append({**item, "change": {
++            "actions": ["create"], "before": None, "after": copy.deepcopy(value), "after_unknown": {}}})
++        return args
++
++    def test_allowlist_order_is_not_significant(self):
++        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "z/*"])
++        policy.validate_plan(args[2], args[0], args[1], args[4])
++
++    def test_allowlist_changed_pattern_rejected(self):
++        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "other/*"])
++        with self.assertRaisesRegex(policy.PolicyError, "allowlist mismatch"):
++            policy.validate_plan(args[2], args[0], args[1], args[4])
++
++    def test_allowlist_changed_boolean_rejected(self):
++        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "z/*"])
++        value = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][-1]["values"]
++        value["allowed_actions_config"][0]["verified_allowed"] = True
++        args[4]["resource_changes"][-1]["change"]["after"] = copy.deepcopy(value)
++        with self.assertRaisesRegex(policy.PolicyError, "allowlist mismatch"):
++            policy.validate_plan(args[2], args[0], args[1], args[4])
 +
 +    def test_snapshot_binding(self):
 +        with tempfile.TemporaryDirectory() as directory:
@@ -1249,6 +2081,99 @@ new file mode 100644
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/automation/repository-policy/test_release_ref.py b/automation/repository-policy/test_release_ref.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_release_ref.py
+@@ -0,0 +1,36 @@
++import importlib.util
++import json
++from pathlib import Path
++import unittest
++from unittest.mock import patch
++
++spec=importlib.util.spec_from_file_location('release_ref',Path(__file__).with_name('release_ref.py'))
++r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
++SHA='a'*40
++
++class ReleaseTests(unittest.TestCase):
++    def test_full_sha_still_supported(self):
++        with patch.object(r,'run',return_value=SHA): self.assertEqual(r.resolve(SHA,'.'),SHA)
++    def test_wrong_sha_rejected(self):
++        with patch.object(r,'run',return_value='b'*40):
++            with self.assertRaises(ValueError): r.resolve(SHA,'.')
++    def test_branches_floating_tags_and_injection_rejected(self):
++        for ref in ['main','v1','v2.1','v2.1.0;echo unsafe','../v1.0.0','v01.0.0']:
++            with self.subTest(ref=ref),self.assertRaises(ValueError):r.resolve(ref,'.')
++    def responses(self,immutable=True,draft=False,tag_sha=SHA):
++        return [SHA,json.dumps({'tag_name':'v2.1.0-rc.2','draft':draft,'immutable':immutable}),json.dumps({'object':{'type':'commit','sha':tag_sha}})]
++    def test_immutable_release_resolves(self):
++        with patch.object(r,'run',side_effect=self.responses()):self.assertEqual(r.resolve('v2.1.0-rc.2','.'),SHA)
++    def test_mutable_and_draft_releases_rejected(self):
++        for immutable,draft in [(False,False),(True,True)]:
++            with patch.object(r,'run',side_effect=self.responses(immutable,draft)):
++                with self.assertRaises(ValueError):r.resolve('v2.1.0-rc.2','.')
++    def test_tag_checkout_mismatch_rejected(self):
++        with patch.object(r,'run',side_effect=self.responses(tag_sha='b'*40)):
++            with self.assertRaises(ValueError):r.resolve('v2.1.0-rc.2','.')
++    def test_annotated_tag_resolves_to_commit(self):
++        responses=self.responses();responses[2]=json.dumps({'object':{'type':'tag','sha':'c'*40}})
++        responses.append(json.dumps({'object':{'type':'commit','sha':SHA}}))
++        with patch.object(r,'run',side_effect=responses):self.assertEqual(r.resolve('v2.1.0-rc.2','.'),SHA)
++
++if __name__=='__main__':unittest.main()
+diff --git a/automation/repository-policy/test_secret_scan.py b/automation/repository-policy/test_secret_scan.py
+new file mode 100644
+--- /dev/null
++++ b/automation/repository-policy/test_secret_scan.py
+@@ -0,0 +1,47 @@
++"""Real pinned scanner tests with synthetic tokens in disposable repositories."""
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++
++SCANNER = Path(__file__).resolve().parents[2] / 'hooks' / 'secret_scan.py'
++TOKEN = 'ghp_' + 'aB3dE5fG7hI9jK1lM2nO4pQ6rS8tU0vW3xY5'
++
++
++class SecretScanTests(unittest.TestCase):
++    def run_scan(self, contents, staged=False, suppress=False, remove=False):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            def git(*args):
++                return subprocess.run(['git', '-C', directory, *args], check=True, capture_output=True)
++            git('init', '-q')
++            git('config', 'user.name', 'Fixture')
++            git('config', 'user.email', 'fixture@example.invalid')
++            (root / 'settings.txt').write_text(contents)
++            if suppress:
++                (root / '.gitleaks.toml').write_text('[allowlist]\npaths = [".*"]\n')
++            git('add', '.')
++            if not staged:
++                git('commit', '-qm', 'Fixture')
++                if remove:
++                    (root / 'settings.txt').write_text('clean\n');git('add', '.');git('commit', '-qm', 'Remove fixture')
++            result = subprocess.run(['python3', '-I', str(SCANNER), *(['--staged'] if staged else []), directory], capture_output=True, text=True)
++            self.assertNotIn(TOKEN, result.stdout + result.stderr)
++            return result.returncode
++
++    def test_clean_history(self):
++        self.assertEqual(self.run_scan('documented configuration\n'), 0)
++
++    def test_secret_in_staged_content(self):
++        self.assertEqual(self.run_scan('token = "' + TOKEN + '"\n', staged=True), 1)
++
++    def test_removed_secret_still_detected_in_history(self):
++        self.assertEqual(self.run_scan('token = "' + TOKEN + '"\n', remove=True), 1)
++
++    def test_candidate_suppressions_cannot_disable_rules(self):
++        self.assertEqual(self.run_scan('token = "' + TOKEN + '" # gitleaks:allow\n', suppress=True), 1)
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/automation/repository-policy/verify_receipt.py b/automation/repository-policy/verify_receipt.py
 new file mode 100644
 --- /dev/null
@@ -1304,6 +2229,14 @@ new file mode 100644
 +
 +if __name__ == "__main__":
 +    sys.exit(main())
+diff --git a/hooks/gitleaks.toml b/hooks/gitleaks.toml
+new file mode 100644
+--- /dev/null
++++ b/hooks/gitleaks.toml
+@@ -0,0 +1,3 @@
++# Central policy: use pinned Gitleaks built-in rules without caller allowlists.
++[extend]
++useDefault = true
 diff --git a/hooks/repository_hygiene.py b/hooks/repository_hygiene.py
 new file mode 100755
 --- /dev/null
@@ -1347,10 +2280,219 @@ new file mode 100755
 +
 +if __name__ == "__main__":
 +    sys.exit(main(sys.argv[1:]))
+diff --git a/hooks/secret_scan.py b/hooks/secret_scan.py
+new file mode 100755
+--- /dev/null
++++ b/hooks/secret_scan.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++"""Pinned secret scanning; repository-controlled suppressions are not loaded."""
++import argparse
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++VERSION = '8.30.1'
++
++
++def scan(repository, staged=False):
++    env = {k: v for k, v in os.environ.items() if not k.startswith('GITLEAKS_')}
++    try:
++        result = subprocess.run(['gitleaks', 'version'], env=env, capture_output=True, text=True, check=True)
++        if result.stdout.strip().removeprefix('v') != VERSION:
++            raise ValueError('Install the documented pinned Gitleaks version ' + VERSION)
++        args = ['gitleaks', 'git', '--config', str(Path(__file__).with_name('gitleaks.toml')),
++                '--gitleaks-ignore-path', os.devnull, '--ignore-gitleaks-allow',
++                '--redact', '--no-banner', '--no-color', '--exit-code', '1']
++        if staged:
++            args += ['--pre-commit', '--staged']
++        else:
++            args += ['--log-opts=--all']
++        return subprocess.run([*args, str(repository)], env=env, check=False).returncode
++    except (OSError, subprocess.CalledProcessError, ValueError) as error:
++        print('Secret scanner failed: ' + str(error), file=sys.stderr)
++        return 2
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--staged', action='store_true')
++    parser.add_argument('repository', nargs='?', default='.')
++    args = parser.parse_args()
++    return scan(args.repository, args.staged)
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/.github/workflows/terraform-deploy.yml b/.github/workflows/terraform-deploy.yml
+--- a/.github/workflows/terraform-deploy.yml
++++ b/.github/workflows/terraform-deploy.yml
+@@ -21,10 +21,29 @@
+       apply-role-arn:
+         type: string
+         required: true
++      repository-policy-required:
++        description: Enable mandatory repository onboarding policy; offline evidence currently blocks apply.
++        type: boolean
++        default: false
++      trusted-policy-ref:
++        type: string
++        default: ''
++      approved-base-ref:
++        type: string
++        default: ''
++      accepted-record-ref:
++        type: string
++        default: ''
+       environment:
+         type: string
+         required: true
+     secrets:
++      TF_GITHUB_PLAN_TOKEN:
++        description: Read-only repository credential for planning; never use the production write token.
++        required: false
++      TF_GITHUB_APPLY_TOKEN:
++        description: Production environment GitHub provider credential; pass this same name from the caller.
++        required: false
+       terraform-github-token:
+         description: Optional credential for the Terraform GitHub provider
+         required: false
+@@ -40,7 +59,7 @@
+ env:
+   TF_IN_AUTOMATION: 'true'
+   TF_INPUT: 'false'
+-  GITHUB_TOKEN: ${{ secrets.terraform-github-token }}
++  GITHUB_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN || secrets.terraform-github-token }}
+ jobs:
+   plan:
+     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+@@ -48,6 +67,7 @@
+     timeout-minutes: 30
+     outputs:
+       changes: ${{ steps.plan.outputs.changes }}
++      policy-artifact-id: ${{ steps.policy-upload.outputs.artifact-id }}
+       artifact-name: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.state-id }}
+     defaults:
+       run:
+@@ -58,6 +78,26 @@
+         with:
+           ref: ${{ github.sha }}
+           persist-credentials: false
++      - name: Require repository policy for inventory roots
++        env:
++          POLICY_REQUIRED: ${{ inputs.repository-policy-required }}
++          POLICY_REF: ${{ inputs.trusted-policy-ref }}
++          BASE_REF: ${{ inputs.approved-base-ref }}
++          RECORD_REF: ${{ inputs.accepted-record-ref }}
++        run: |
++          if test -f repositories.json && test "$POLICY_REQUIRED" != true; then
++            echo 'Repository inventory roots require mandatory policy. Deployment is blocked.' >&2
++            exit 1
++          fi
++          if test "$POLICY_REQUIRED" = true; then
++            for revision in "$POLICY_REF" "$BASE_REF" "$RECORD_REF"; do
++              [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Missing immutable trusted policy/base/record revision.' >&2; exit 1; }
++            done
++          fi
++      - name: Require repository planning credential
++        if: inputs.repository-policy-required
++        run: |
++          test -n "$GITHUB_TOKEN" || { echo 'Missing repository TF_GITHUB_PLAN_TOKEN.' >&2; exit 1; }
+       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+         with:
+           terraform_version: ${{ inputs.terraform-version }}
+@@ -81,6 +121,34 @@
+             2) echo 'changes=true' >> "$GITHUB_OUTPUT" ;;
+             *) exit "$status" ;;
+           esac
++      - name: Export repository policy inputs
++        if: inputs.repository-policy-required
++        env:
++          SOURCE_SHA: ${{ github.sha }}
++          WORK_DIR: ${{ inputs.working-directory }}
++        run: |
++          set -euo pipefail
++          test -f repositories.json
++          mkdir -p "$RUNNER_TEMP/repository-policy-input/candidate"
++          cp tfplan "$RUNNER_TEMP/repository-policy-input/saved.tfplan"
++          terraform show -json tfplan > "$RUNNER_TEMP/repository-policy-input/plan.json"
++          # Snapshot source rather than executing it in the policy runner.
++          case "$WORK_DIR" in
++            .) git archive "$SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/repository-policy-input/candidate" ;;
++            *) git archive "$SOURCE_SHA:$WORK_DIR" | tar -x -C "$RUNNER_TEMP/repository-policy-input/candidate" ;;
++          esac
++          test -f "$RUNNER_TEMP/repository-policy-input/candidate/repositories.json"
++          # Fixture-only until a trusted independent live collector is configured.
++          printf '%s\n' '{"schema_version":1,"repositories":{}}' > "$RUNNER_TEMP/repository-policy-input/observations.json"
++      - name: Upload policy data for the isolated runner
++        id: policy-upload
++        if: inputs.repository-policy-required
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
++        with:
++          name: repository-policy-input-${{ github.run_id }}-${{ github.run_attempt }}
++          path: ${{ runner.temp }}/repository-policy-input
++          retention-days: 1
++          if-no-files-found: error
+       - name: Package exact planned working directory
+         if: steps.plan.outputs.changes == 'true'
+         run: tar --exclude='./.git' -czf "$RUNNER_TEMP/terraform-plan.tgz" .
+@@ -92,11 +160,38 @@
+           path: ${{ runner.temp }}/terraform-plan.tgz
+           retention-days: 1
+           if-no-files-found: error
++  repository-policy:
++    needs: plan
++    if: inputs.repository-policy-required
++    permissions:
++      contents: read
++      id-token: none
++    uses: ./.github/workflows/repository-policy.yml
++    with:
++      trusted-policy-ref: ${{ inputs.trusted-policy-ref }}
++      approved-base-ref: ${{ inputs.approved-base-ref }}
++      accepted-record-ref: ${{ inputs.accepted-record-ref }}
++      configuration-sha: ${{ github.sha }}
++      artifact-id: ${{ fromJSON(needs.plan.outputs.policy-artifact-id) }}
++  repository-authorization:
++    needs: repository-policy
++    if: inputs.repository-policy-required
++    runs-on: ubuntu-latest
++    permissions: {}
++    steps:
++      - name: Reject fixture-only deployment authorization
++        run: |
++          echo 'Offline policy cannot authorize apply. Independent live collection and protected record integration are required.' >&2
++          exit 1
+   apply:
+     env:
+-      GITHUB_TOKEN: ${{ secrets.apply-terraform-github-token }}
+-    needs: plan
+-    if: needs.plan.outputs.changes == 'true'
++      GITHUB_TOKEN: ${{ secrets.TF_GITHUB_APPLY_TOKEN || secrets.apply-terraform-github-token }}
++    needs: [plan, repository-authorization]
++    if: >-
++      always() && !cancelled() && needs.plan.result == 'success' &&
++      needs.plan.outputs.changes == 'true' &&
++      ((!inputs.repository-policy-required && needs.repository-authorization.result == 'skipped') ||
++       (inputs.repository-policy-required && needs.repository-authorization.result == 'success'))
+     environment: ${{ inputs.environment }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 60
+@@ -132,5 +227,9 @@
+         with:
+           role-to-assume: ${{ inputs.apply-role-arn }}
+           aws-region: ${{ inputs.aws-region }}
++      - name: Require repository apply credential
++        if: inputs.repository-policy-required
++        run: |
++          test -n "$GITHUB_TOKEN" || { echo 'Missing production TF_GITHUB_APPLY_TOKEN.' >&2; exit 1; }
+       - name: Apply approved saved plan
+         run: terraform apply -input=false -lock-timeout=5m -no-color tfplan
 diff --git a/TERRAFORM.md b/TERRAFORM.md
 --- a/TERRAFORM.md
 +++ b/TERRAFORM.md
-@@ -35,3 +35,40 @@
+@@ -35,3 +35,55 @@
  ## Validation
  
  Run `actionlint` against both reusable workflows and the caller. Run `terraform fmt -check -recursive` and `terraform init -backend=false` followed by `terraform validate` in the caller. Live planning additionally verifies OIDC trust, backend access and provider credentials. Local YAML/shell checks do not establish those permissions. Never run an apply merely to test the pipeline.
@@ -1391,3 +2533,18 @@ diff --git a/TERRAFORM.md b/TERRAFORM.md
 +environments gate live rollout, not local validation. See automation/repository-policy/
 +README.md for the offline input/receipt schema and the remaining live trust boundary.
 +Codex review remains optional advisory follow-on, not the initial required gate.
++
++## Repository inventory deployment gates (local integration)
++
++The shared deployment workflow now supports repository-policy-required and pinned
++policy/base/record revisions. Inventory roots containing repositories.json cannot
++disable this gate. Policy runs separately from candidate Terraform execution.
++Repository apply remains blocked because offline receipts cannot authorize it;
++independent live evidence and protected accepted-record integration must be
++implemented and tested before replacing the explicit authorization block. Ordinary
++non-inventory consumers retain their existing deployment path.
++
++Shared hygiene CI and local hooks now provide checksum-pinned Gitleaks 8.30.1
++secret detection. Local hooks require that version installed; CI rejects caller
++suppression files/comments and scans full fetched history with redacted output.
++Vulnerability scanning is separate future work.

@@ -118,7 +118,7 @@ def timestamp(value):
     return parsed
 
 
-def observations(repo, prior, observed, now, needs_protection):
+def observations(repo, prior, observed, now, needs_protection, protected_checks=None):
     require(isinstance(observed, dict), "Missing independently supplied observation")
     require(observed.get("source") == "offline-fixture", "Only clearly marked offline observations are supported locally")
     require(SHA.fullmatch(observed.get("head_sha", "")), "Missing observed content commit")
@@ -137,7 +137,7 @@ def observations(repo, prior, observed, now, needs_protection):
     if needs_protection:
         for flag in ("protection_active", "codeowner_review_required", "force_push_blocked", "deletion_blocked", "dummy_substitution_review_blocked", "untrusted_push_blocked"):
             require(observed.get(flag) is True, "Protection observation failed: " + flag)
-        require(normalize_checks(observed.get("effective_required_checks", {})) == normalize_checks(repo.get("required_checks", {})), "Effective checks differ from verified contract")
+        require(normalize_checks(observed.get("effective_required_checks", {})) == normalize_checks(repo.get("required_checks", {}) if protected_checks is None else protected_checks), "Effective checks differ from accepted protection baseline")
 
 
 def validate_transition(base, record, candidate, evidence, now):
@@ -164,14 +164,18 @@ def validate_transition(base, record, candidate, evidence, now):
         require(repo.get("initialization", "basic") == old.get("initialization", "basic") and repo.get("template") == old.get("template"), "Creation intent cannot change")
         changed = tooling_digest(repo) != tooling_digest(old)
         if repo["stage"] != "create":
-            # At grant stage, changed tooling is evaluated in a content PR first;
-            # the root may not alter enforcement until effective checks match.
+            # Before apply, live enforcement must match the accepted baseline.
+            # Candidate checks are validated above; post-apply collection must
+            # verify the candidate contract before accepting the new record.
             observations(repo, accepted, evidence.get("repositories", {}).get(key), now,
-                         needs_protection=(repo["stage"] == "grant"))
+                         needs_protection=(old["stage"] in ("protect", "grant")),
+                         protected_checks=old.get("required_checks", {}))
         if old["stage"] in ("protect", "grant"):
-            removed = set(old.get("required_checks", {})) - set(repo.get("required_checks", {}))
-            if removed:
-                retained = set(old.get("required_checks", {})) & set(repo.get("required_checks", {}))
+            old_checks = normalize_checks(old.get("required_checks", {}))
+            new_checks = normalize_checks(repo.get("required_checks", {}))
+            if old_checks != new_checks:
+                retained = [context for context in old_checks
+                            if context in new_checks and old_checks[context] == new_checks[context]]
                 require(retained, "Check migration requires verified overlap")
         if changed and old["stage"] == "grant":
             require(repo["stage"] == "grant", "Tooling updates must retain onboarding stage")
@@ -256,7 +260,11 @@ def validate_plan(candidate, base, record, plan):
         if item["type"] == "github_repository" and key not in previous and actions == ["create"]:
             # Newly created external/computed configuration is inspected after
             # creation. It must not be guessed in a pre-creation plan.
-            harmless_computed.update({"security_and_analysis", "allow_forking", "vulnerability_alerts", "default_branch", "pages"})
+            require(after.get("fork") in (None, "", "false", False), "Fork creation is unsupported")
+            require(all(after.get(k) in (None, "") for k in ("source_owner", "source_repo")), "Fork source is unsupported")
+            harmless_computed.update({"security_and_analysis", "allow_forking", "vulnerability_alerts", "default_branch", "pages",
+                                      "full_name", "private", "fork", "source_owner", "source_repo",
+                                      "web_commit_signoff_required"})
         require(not has_unknown({k: v for k, v in unknown.items() if k not in harmless_computed}), "Unknown critical policy value")
         if item["type"] == "github_repository":
             if key in previous:
@@ -315,27 +323,30 @@ def validate_plan(candidate, base, record, plan):
         require(len(actual_teams) == len(teams) and actual_teams == expected_teams, "Premature or undeclared team grant")
         for r in teams:
             require(r["values"].get("repository") == repo["name"], "Team grant targets wrong repository")
-        rs = one([r for r in items if r["type"] == "github_repository_ruleset"], "ruleset")["values"]
-        require(rs.get("repository") == repo["name"] and rs.get("target") == "branch", "Wrong ruleset target")
-        require(not rs.get("bypass_actors"), "Root baseline does not permit bypass actors")
-        condition = one(one(rs.get("conditions"), "conditions").get("ref_name"), "ref_name")
-        require(condition.get("include") == ["~DEFAULT_BRANCH"] and condition.get("exclude") == [], "Protection scope changed")
-        require(rs.get("enforcement") == ("active" if repo["stage"] in ("protect", "grant") else "disabled"), "Wrong ruleset enforcement")
-        rules = one(rs.get("rules"), "rules")
-        require(rules.get("deletion") is True and rules.get("non_fast_forward") is True, "Missing deletion/force-push protection")
-        pr = one(rules.get("pull_request"), "pull request policy")
-        require(pr.get("required_approving_review_count") == 1 and all(pr.get(flag) is True for flag in ("require_code_owner_review", "dismiss_stale_reviews_on_push", "require_last_push_approval", "required_review_thread_resolution")), "Review policy weakened or unknown")
-        checks = repo.get("required_checks", {})
-        status = rules.get("required_status_checks") or []
-        if checks:
-            status = one(status, "status policy")
-            require(status.get("strict_required_status_checks_policy") is True, "Strict check policy missing")
-            # SDK defaults omitted integration IDs to 0; this means no source
-            # restriction, not an invented GitHub integration identity.
-            actual = normalize_checks({c["context"]: {"integration_id": c.get("integration_id")} for c in status.get("required_check", [])})
-            require(actual == normalize_checks(checks), "Planned check contract differs")
-        else:
-            require(not status, "Unexpected status policy")
+        rulesets = [r for r in items if r["type"] == "github_repository_ruleset"]
+        require(rulesets or repo["stage"] not in ("protect", "grant"), "Protected stages require a ruleset")
+        if rulesets:
+            rs = one(rulesets, "ruleset")["values"]
+            require(rs.get("repository") == repo["name"] and rs.get("target") == "branch", "Wrong ruleset target")
+            require(not rs.get("bypass_actors"), "Root baseline does not permit bypass actors")
+            condition = one(one(rs.get("conditions"), "conditions").get("ref_name"), "ref_name")
+            require(condition.get("include") == ["~DEFAULT_BRANCH"] and condition.get("exclude") == [], "Protection scope changed")
+            require(rs.get("enforcement") == ("active" if repo["stage"] in ("protect", "grant") else "disabled"), "Wrong ruleset enforcement")
+            rules = one(rs.get("rules"), "rules")
+            require(rules.get("deletion") is True and rules.get("non_fast_forward") is True, "Missing deletion/force-push protection")
+            pr = one(rules.get("pull_request"), "pull request policy")
+            require(pr.get("required_approving_review_count") == 1 and all(pr.get(flag) is True for flag in ("require_code_owner_review", "dismiss_stale_reviews_on_push", "require_last_push_approval", "required_review_thread_resolution")), "Review policy weakened or unknown")
+            checks = repo.get("required_checks", {})
+            status = rules.get("required_status_checks") or []
+            if checks:
+                status = one(status, "status policy")
+                require(status.get("strict_required_status_checks_policy") is True, "Strict check policy missing")
+                # SDK defaults omitted integration IDs to 0; this means no source
+                # restriction, not an invented GitHub integration identity.
+                actual = normalize_checks({c["context"]: {"integration_id": c.get("integration_id")} for c in status.get("required_check", [])})
+                require(actual == normalize_checks(checks), "Planned check contract differs")
+            else:
+                require(not status, "Unexpected status policy")
         for kind, field in (("github_actions_repository_permissions", "actions_policy"), ("github_workflow_repository_permissions", "workflow_permissions"), ("github_branch_default", "default_branch")):
             matches = [r for r in items if r["type"] == kind]
             configured = repo.get(field)
@@ -349,7 +360,13 @@ def validate_plan(candidate, base, record, plan):
                     require(all(value.get(k) == configured[k] for k in ("default_workflow_permissions", "can_approve_pull_request_reviews")), "Workflow policy mismatch")
                 else:
                     require(all(value.get(k) == configured[k] for k in ("enabled", "allowed_actions", "sha_pinning_required")), "Actions policy mismatch")
-                    require((value.get("allowed_actions_config") or []) == ([configured["selected"]] if configured.get("selected") is not None else []), "Actions allowlist mismatch")
+                    actual_config = value.get("allowed_actions_config") or []
+                    expected_config = [configured["selected"]] if configured.get("selected") is not None else []
+                    # Provider and module schemas model patterns as a set.
+                    def normalize_allowlist(blocks):
+                        return [{**block, "patterns_allowed": sorted(set(block.get("patterns_allowed", [])))}
+                                for block in blocks]
+                    require(normalize_allowlist(actual_config) == normalize_allowlist(expected_config), "Actions allowlist mismatch")
 
 
 def evaluate(base, record, candidate, evidence, plan, now):

@@ -1,0 +1,235 @@
+name: Reusable Terraform deployment
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: '.'
+      terraform-version:
+        type: string
+        required: true
+      aws-region:
+        type: string
+        default: us-west-2
+      plan-role-arn:
+        type: string
+        required: true
+      state-id:
+        description: Unique identifier for this state within the caller repository
+        type: string
+        required: true
+      apply-role-arn:
+        type: string
+        required: true
+      repository-policy-required:
+        description: Enable mandatory repository onboarding policy; offline evidence currently blocks apply.
+        type: boolean
+        default: false
+      trusted-policy-ref:
+        type: string
+        default: ''
+      approved-base-ref:
+        type: string
+        default: ''
+      accepted-record-ref:
+        type: string
+        default: ''
+      environment:
+        type: string
+        required: true
+    secrets:
+      TF_GITHUB_PLAN_TOKEN:
+        description: Read-only repository credential for planning; never use the production write token.
+        required: false
+      TF_GITHUB_APPLY_TOKEN:
+        description: Production environment GitHub provider credential; pass this same name from the caller.
+        required: false
+      terraform-github-token:
+        description: Optional credential for the Terraform GitHub provider
+        required: false
+      apply-terraform-github-token:
+        description: Optional write credential for the Terraform GitHub provider
+        required: false
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: terraform-deploy-${{ inputs.state-id }}
+  cancel-in-progress: false
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  GITHUB_TOKEN: ${{ secrets.TF_GITHUB_PLAN_TOKEN || secrets.terraform-github-token }}
+jobs:
+  plan:
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+      policy-artifact-id: ${{ steps.policy-upload.outputs.artifact-id }}
+      artifact-name: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.state-id }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require repository policy for inventory roots
+        env:
+          POLICY_REQUIRED: ${{ inputs.repository-policy-required }}
+          POLICY_REF: ${{ inputs.trusted-policy-ref }}
+          BASE_REF: ${{ inputs.approved-base-ref }}
+          RECORD_REF: ${{ inputs.accepted-record-ref }}
+        run: |
+          if test -f repositories.json && test "$POLICY_REQUIRED" != true; then
+            echo 'Repository inventory roots require mandatory policy. Deployment is blocked.' >&2
+            exit 1
+          fi
+          if test "$POLICY_REQUIRED" = true; then
+            for revision in "$POLICY_REF" "$BASE_REF" "$RECORD_REF"; do
+              [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Missing immutable trusted policy/base/record revision.' >&2; exit 1; }
+            done
+          fi
+      - name: Require repository planning credential
+        if: inputs.repository-policy-required
+        run: |
+          test -n "$GITHUB_TOKEN" || { echo 'Missing repository TF_GITHUB_PLAN_TOKEN.' >&2; exit 1; }
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          role-to-assume: ${{ inputs.plan-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+      - run: terraform fmt -check -recursive
+      - run: terraform init -input=false
+      - run: terraform validate -no-color
+      - name: Create deployment plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -lock-timeout=5m -no-color -detailed-exitcode -out=tfplan
+          status=$?
+          set -e
+          case "$status" in
+            0) echo 'changes=false' >> "$GITHUB_OUTPUT" ;;
+            2) echo 'changes=true' >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
+      - name: Export repository policy inputs
+        if: inputs.repository-policy-required
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          WORK_DIR: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          test -f repositories.json
+          mkdir -p "$RUNNER_TEMP/repository-policy-input/candidate"
+          cp tfplan "$RUNNER_TEMP/repository-policy-input/saved.tfplan"
+          terraform show -json tfplan > "$RUNNER_TEMP/repository-policy-input/plan.json"
+          # Snapshot source rather than executing it in the policy runner.
+          case "$WORK_DIR" in
+            .) git archive "$SOURCE_SHA" | tar -x -C "$RUNNER_TEMP/repository-policy-input/candidate" ;;
+            *) git archive "$SOURCE_SHA:$WORK_DIR" | tar -x -C "$RUNNER_TEMP/repository-policy-input/candidate" ;;
+          esac
+          test -f "$RUNNER_TEMP/repository-policy-input/candidate/repositories.json"
+          # Fixture-only until a trusted independent live collector is configured.
+          printf '%s\n' '{"schema_version":1,"repositories":{}}' > "$RUNNER_TEMP/repository-policy-input/observations.json"
+      - name: Upload policy data for the isolated runner
+        id: policy-upload
+        if: inputs.repository-policy-required
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repository-policy-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/repository-policy-input
+          retention-days: 1
+          if-no-files-found: error
+      - name: Package exact planned working directory
+        if: steps.plan.outputs.changes == 'true'
+        run: tar --exclude='./.git' -czf "$RUNNER_TEMP/terraform-plan.tgz" .
+      - name: Upload sensitive deployment bundle
+        if: steps.plan.outputs.changes == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: terraform-plan-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.state-id }}
+          path: ${{ runner.temp }}/terraform-plan.tgz
+          retention-days: 1
+          if-no-files-found: error
+  repository-policy:
+    needs: plan
+    if: inputs.repository-policy-required
+    permissions:
+      contents: read
+      id-token: none
+    uses: ./.github/workflows/repository-policy.yml
+    with:
+      trusted-policy-ref: ${{ inputs.trusted-policy-ref }}
+      approved-base-ref: ${{ inputs.approved-base-ref }}
+      accepted-record-ref: ${{ inputs.accepted-record-ref }}
+      configuration-sha: ${{ github.sha }}
+      artifact-id: ${{ fromJSON(needs.plan.outputs.policy-artifact-id) }}
+  repository-authorization:
+    needs: repository-policy
+    if: inputs.repository-policy-required
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject fixture-only deployment authorization
+        run: |
+          echo 'Offline policy cannot authorize apply. Independent live collection and protected record integration are required.' >&2
+          exit 1
+  apply:
+    env:
+      GITHUB_TOKEN: ${{ secrets.TF_GITHUB_APPLY_TOKEN || secrets.apply-terraform-github-token }}
+    needs: [plan, repository-authorization]
+    if: >-
+      always() && !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.changes == 'true' &&
+      ((!inputs.repository-policy-required && needs.repository-authorization.result == 'skipped') ||
+       (inputs.repository-policy-required && needs.repository-authorization.result == 'success'))
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reject a superseded deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          latest=$(gh api "repos/$REPOSITORY/commits/$DEFAULT_BRANCH" --jq '.sha')
+          test "$latest" = "$SOURCE_SHA" || { echo 'Default branch advanced. Generate and approve a fresh plan.'; exit 1; }
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ needs.plan.outputs.artifact-name }}
+          path: ${{ runner.temp }}/terraform-plan
+      - name: Restore planned working directory
+        run: tar -xzf "$RUNNER_TEMP/terraform-plan/terraform-plan.tgz"
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708
+        with:
+          role-to-assume: ${{ inputs.apply-role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+      - name: Require repository apply credential
+        if: inputs.repository-policy-required
+        run: |
+          test -n "$GITHUB_TOKEN" || { echo 'Missing production TF_GITHUB_APPLY_TOKEN.' >&2; exit 1; }
+      - name: Apply approved saved plan
+        run: terraform apply -input=false -lock-timeout=5m -no-color tfplan

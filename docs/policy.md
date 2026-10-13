@@ -45,8 +45,9 @@ must match the accepted record for existing repositories.
    Apply only the inspected saved plan. Do not replan inside the apply job.
 6. Verify post-operation facts; only then write the next accepted record.
 
-Existing terraform-plan.yml and terraform-deploy.yml remain unchanged. New gate
-integration must be implemented and separately accepted before enabling this root.
+terraform-plan.yml remains unchanged. terraform-deploy.yml now connects isolated
+policy evaluation and an explicit fixture-authorization block. See deployment-gates.md
+for the remaining live integration before enabling this root.
 All mandatory gates apply equally to manual dispatch and reruns. Reruns after
 partial apply, stale inputs, missing/expired artifacts, or changed default branch
 require a new plan and approval. A green PR test is not deployment authorization.
@@ -59,3 +60,12 @@ truth flags prove validator behavior only, never GitHub behavior. Reviewers and
 admins remain trusted; pinned refs chosen by untrusted candidates are not trusted
 policy. Administrative credentials outside the gated workflow can bypass policy.
 Backend locking and cross-repository state ownership still need live verification.
+
+## Required-check migration evaluation
+
+Pre-apply observations must match the accepted baseline check contract, while
+successful candidate runs must demonstrate the proposed checks. Changes retain
+at least one unchanged context and integration source. After apply, the pending
+live collector must verify the proposed effective contract before advancing the
+accepted record. Actions allowlist patterns are compared as sets; boolean
+permissions and pattern membership remain exact.

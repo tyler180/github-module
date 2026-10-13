@@ -1,27 +1,18 @@
-# github-workflows local additions
+# github-workflows local integration
 
-Direct writes to the sibling checkout were rejected by this session's writable
-root policy. `additions/` contains the complete files intended for github-workflows.
-`local-additions.patch` adds them and appends TERRAFORM-addendum.md to existing
-TERRAFORM.md; it does not change any existing workflow. baseline-sha256.json records
-the inspected original bytes. The patch is verified against an isolated temporary
-copy, not applied to the sibling repository.
+The sibling checkout now contains the shared additions and deployment-gate
+integration. additions/ retains shared new files; updates/ retains the modified
+terraform-deploy.yml. local-additions.patch installs both against the committed
+pre-integration baseline and appends the documentation addendum. It is intended
+for a checkout without these local changes, not reapplication over the updated
+sibling. baseline-sha256.json identifies the original baseline bytes.
 
-Build/rebuild without modifying the sibling:
+Repository policy executes separately from candidate Terraform. The connected
+authorization gate deliberately rejects fixture-only deployment; independent
+live collection, protected record storage/writing, and fresh pre-apply rechecks
+remain necessary. No deployment has been enabled or remotely executed.
 
-```sh
-python3 scripts/build-workflows-patch.py --checkout /path/to/github-workflows
-```
-
-Review/apply later in a session that can write the sibling checkout. No push,
-release, caller installation, credentials, backend, or deployment enablement is
-part of this patch. All new workflows use workflow_call only.
-
-New shared components: module validation, generic hygiene, Go pilot, offline policy
-fixtures and isolated plan evaluation, hook definitions, standard-library policy
-and receipt tests. Pins copied from existing workflow conventions were retained;
-setup-go v6 SHA was resolved from the official action repository.
-
-Live collection, protected accepted-record storage/writer, trustworthy plan JSON
-production, and deployment-gate integration remain explicitly pending. Offline
-receipts cannot authorize a live apply.
+Shared hygiene now includes checksum-pinned Gitleaks 8.30.1. The generic hook
+configuration includes staged secret detection. Tests require Gitleaks 8.30.1,
+PyYAML 6.0.3, Python 3.10+, Terraform and actionlint. See ../../docs/security-scanning.md
+and ../../docs/deployment-gates.md for scope and remaining integration.

@@ -19,7 +19,7 @@ in the consuming root. No deployment or release has been enabled.
 
 ## Local verification
 
-Terraform >= 1.7 (< 2), Python >= 3.10, and actionlint are needed. The local test
+Terraform >= 1.7 (< 2), Python >= 3.10, PyYAML 6.0.3, Gitleaks 8.30.1, and actionlint are needed. The local test
 host has Terraform 1.15.8. Provider baseline is integrations/github 6.13.0.
 
 Run `bash scripts/validate-local.sh`. It never runs `terraform apply` or a
@@ -28,8 +28,8 @@ Terraform tests use `command = plan` and a mock provider. Do not add unmocked
 provider tests to this credential-free suite.
 
 See [verification status](docs/verification.md): local policy and workflow checks
-passed; provider RPC execution is blocked by this session's sandbox, so Terraform
-validation and mocked-test execution are not claimed successful.
+passed. Provider validation and all 14 mocked Terraform runs now pass outside the
+sandbox socket restriction. See docs/verification.md for the updated results.
 
 ## Usage
 
@@ -71,9 +71,10 @@ Read [ownership](docs/ownership.md) before changing an optional component to nul
 ## Shared automation
 
 Reuse `github-workflows` and its existing Terraform plan/deploy contract. Its
-credentialed workflows are unchanged; validation is a separate reusable workflow.
-The sibling checkout is outside this session's writable roots, so additions are
-staged here with a patch instead of claiming they were applied there.
+planning contract is retained; deployment now connects the required repository-policy
+gates. Validation remains a separate reusable workflow.
+The sibling checkout contains the shared additions and local deployment-gate
+integration. Copies and a reviewable installation patch are retained here.
 
 No caller is installed or enabled in `.github/workflows` in github-module.
 Template `.in` files require actual reviewed pins and reviewer identities. The
@@ -90,3 +91,5 @@ deployment gates before using any receipt for a live integration.
 
 See [onboarding](docs/onboarding.md), [trusted policy boundary](docs/policy.md),
 [upgrades](docs/upgrades.md), and [pending live acceptance](docs/live-acceptance.md).
+
+See [secret scanning](docs/security-scanning.md) and [deployment gates](docs/deployment-gates.md). Repository apply remains blocked pending live authorization integration.

@@ -6,7 +6,7 @@ on:
         type: string
         required: true
       tooling-ref:
-        description: Same reviewed full github-workflows SHA used for this workflow call.
+        description: Same reviewed github-workflows SHA or immutable release tag used for this workflow call.
         type: string
         required: true
       working-directory:
@@ -35,7 +35,12 @@ jobs:
           go-version: ${{ inputs.go-version }}
           cache: false
       - name: Formatting
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted=$(gofmt -l .)
+          if test -n "$unformatted"; then
+            printf 'Run gofmt on:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test -race ./...
   gate:
