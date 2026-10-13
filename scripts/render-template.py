@@ -49,7 +49,7 @@ def main():
         pilot = root / "examples" / "go-pilot"
         for path in pilot.rglob("*"):
             relative = path.relative_to(pilot)
-            if not path.is_file() or path.name.endswith(".in") or any(part in (".git", "__pycache__", ".terraform", "terraform") for part in relative.parts):
+            if not path.is_file() or path.name.endswith(".in") or any(part in (".git", ".venv", "__pycache__", ".terraform", "terraform") for part in relative.parts):
                 continue
             if str(relative) in (".github/workflows/ci.yml", ".pre-commit-config.yaml", ".github/CODEOWNERS"):
                 continue
@@ -65,6 +65,8 @@ def main():
             target.write_text(content)
             target.chmod(path.stat().st_mode & 0o777)
         (destination / ".github/CODEOWNERS").write_text("* @" + args.code_owner + "\n")
+        with (destination / ".pre-commit-config.yaml").open("a") as hooks:
+            hooks.write("  - repo: local\n    hooks:\n      - id: go-validation\n        name: Go formatting, vet and race tests\n        entry: bash scripts/validate.sh\n        language: system\n        pass_filenames: false\n        always_run: true\n")
     print("Local starter materialized. Source commit provenance and live checks remain pending.")
 
 
