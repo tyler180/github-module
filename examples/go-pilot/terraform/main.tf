@@ -25,7 +25,7 @@ provider "github" {
 }
 
 module "repository" {
-  source = "../../.."
+  source = "git::https://github.com/tyler180/github-module.git?ref=v0.1.0-rc.2"
 
   name                   = var.name
   description            = "Go pilot created with the GitHub repository Terraform module."

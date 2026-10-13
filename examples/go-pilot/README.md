@@ -6,16 +6,23 @@ steps below.
 
 ## Create the repository
 
-Run from this directory in a checkout of github-module. Install Terraform 1.7+
-and set `GITHUB_TOKEN` securely in your shell to a token that can create and
-administer repositories for your owner. Do not put the token in Terraform files.
+The `terraform/` folder is a standalone caller of the published
+`github-module` release `v0.1.0-rc.2`. Copy its contents (including hidden files)
+into a new directory outside the module checkout, for example
+`~/Projects/github-go-pilot-infra`, and run the commands below from that directory.
+The caller downloads the module from GitHub; it does not depend on the location
+of the example files.
+
+Install Terraform 1.7+ and Git, and set `GITHUB_TOKEN` securely in your shell to a
+token that can create and administer repositories for your owner. Do not put the
+token in Terraform files.
 
 ```sh
-terraform -chdir=terraform init
-terraform -chdir=terraform plan -var="owner=YOUR_GITHUB_OWNER" -out=pilot.tfplan
+terraform init
+terraform plan -var="owner=YOUR_GITHUB_OWNER" -out=pilot.tfplan
 # Review the plan, then create the repository:
-terraform -chdir=terraform apply pilot.tfplan
-terraform -chdir=terraform output repository_url
+terraform apply pilot.tfplan
+terraform output repository_url
 ```
 
 The default name is `github-go-pilot`; add `-var="name=YOUR_REPOSITORY_NAME"` to
@@ -23,11 +30,13 @@ the plan command to change it. The module initializes a README, sets `main` as
 the default branch, and configures private visibility and squash merging. It
 does not upload the Go source.
 
-This standalone example uses local Terraform state in `terraform/`. Keep that
-state securely: it owns the repository. Commit its `.terraform.lock.hcl` after
+This standalone caller uses local Terraform state in the directory you copied
+it into. Configure your own backend before initialization if you need remote
+state. Keep the state securely: it owns the repository. Commit its `.terraform.lock.hcl` after
 initialization, but keep state, plans, and credentials out of Git. Do not also
 manage the same repository from github-infra. If you want the existing protected
-deployment workflow, add this intent to github-infra instead and deploy there;
+deployment workflow, add a repository entry to its existing `repositories.json`
+inventory instead of copying this standalone root over github-infra, then deploy there;
 the commands above demonstrate a separate local deployment.
 
 Next follow [BOOTSTRAP.md](BOOTSTRAP.md) to add the Go files to the new repository.
