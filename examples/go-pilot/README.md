@@ -58,8 +58,8 @@ The first command prints `Hello, Go pilot!`; the second prints `Hello, Tyler!`.
 An empty or whitespace-only name produces `Hello, world!`.
 
 `make run`, `make test`, and `make check` provide the same local entry points.
-Validation checks formatting, runs `go vet`, runs race-enabled tests, and checks
-CLI output. The program has no shared concurrent state; the race run is a smoke
+Validation checks formatting, runs `go vet`, and runs the repository's race-enabled
+tests. The program has no shared concurrent state; the race run is a smoke
 check, not proof of concurrent behavior. No `go.sum` is needed without external
 module dependencies.
 
@@ -84,3 +84,7 @@ the Git hooks, and prepares checksum-pinned Gitleaks 8.30.1 in a user cache.
 No global pre-commit/Gitleaks install or PATH change is required. The first setup
 needs network access; subsequent scanner runs reuse the verified cache. Repeat
 setup for each clone. macOS/Linux arm64 and x86_64 are supported.
+
+`main.go` and `TestGreeting` are editable starter examples. Update or replace the
+example tests when application behavior changes. Validation does not run the
+greeting command or require its original output.

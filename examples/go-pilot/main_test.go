@@ -2,6 +2,8 @@ package main
 
 import "testing"
 
+// TestGreeting exercises the starter example. Update or replace these cases as
+// the application evolves; the platform requires passing tests, not this greeting.
 func TestGreeting(t *testing.T) {
 	tests := []struct {
 		name  string
