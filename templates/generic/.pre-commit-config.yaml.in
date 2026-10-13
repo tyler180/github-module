@@ -4,3 +4,4 @@ repos:
     hooks:
       - id: repository-hygiene
       - id: secret-scan
+      - id: secret-scan-setup

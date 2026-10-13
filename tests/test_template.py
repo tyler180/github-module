@@ -1,4 +1,5 @@
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -40,9 +41,15 @@ class TemplateTests(unittest.TestCase):
         result = self.run_renderer(["--go-version", "1.26.5", "--go-module", "github.com/fixture-owner/pilot"], args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("module github.com/fixture-owner/pilot", (self.destination / "go.mod").read_text())
-        for name in ("main.go", "main_test.go", "scripts/validate.sh", "Makefile", "BOOTSTRAP.md"):
+        for name in ("main.go", "main_test.go", "scripts/validate.sh", "scripts/setup.sh", "Makefile", "BOOTSTRAP.md"):
             self.assertTrue((self.destination / name).is_file(), name)
         self.assertTrue((self.destination / "scripts/validate.sh").stat().st_mode & 0o111)
+        self.assertTrue((self.destination / "scripts/setup.sh").stat().st_mode & 0o111)
+        self.assertIn("setup:", (self.destination / "Makefile").read_text())
+        self.assertIn("/.venv/", (self.destination / ".gitignore").read_text())
+        hooks = (self.destination / ".pre-commit-config.yaml").read_text()
+        self.assertIn("secret-scan-setup", hooks)
+        self.assertEqual(hooks.count("id: go-validation"), 1)
         self.assertFalse((self.destination / "terraform").exists())
         self.assertEqual((self.destination / ".github/CODEOWNERS").read_text(), "* @fixture-owner/platform\n")
         self.assertFalse(any(p.name.endswith(".in") for p in self.destination.rglob("*")))
@@ -51,6 +58,22 @@ class TemplateTests(unittest.TestCase):
         result = self.run_renderer(["--go-version", "1.26.5", "--go-module", "example.com/pilot\ngo 1.0"])
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.destination.exists())
+
+    def test_renderer_excludes_local_developer_environment(self):
+        source = Path(self.temp.name) / "source"
+        (source / "scripts").mkdir(parents=True)
+        shutil.copy(ROOT / "scripts/render-template.py", source / "scripts/render-template.py")
+        shutil.copytree(ROOT / "templates", source / "templates")
+        shutil.copytree(ROOT / "examples/go-pilot", source / "examples/go-pilot",
+                        ignore=shutil.ignore_patterns(".venv", ".terraform", "__pycache__"))
+        environment = source / "examples/go-pilot/.venv"
+        environment.mkdir()
+        (environment / "local-only.txt").write_text("must not be bootstrapped")
+        args = self.args.copy()
+        args[2] = str(source / "scripts/render-template.py")
+        result = self.run_renderer(["--go-version", "1.26.5"], args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.destination / ".venv").exists())
 
     def test_refuses_overwrite(self):
         self.destination.mkdir()

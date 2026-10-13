@@ -6,18 +6,14 @@ history with central built-in rules, redacts output, and rejects scanner errors.
 Candidate `.gitleaks.toml`, `.gitleaksignore`, and `gitleaks:allow` comments cannot
 suppress the central scan. A scan failure, cancellation, or skip fails platform-ci.
 
-The generic pre-commit configuration includes the shared `secret-scan` hook. It
-scans staged changes and requires Gitleaks 8.30.1 installed locally. Install that
-exact release from https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1 and
-verify its published checksum. No automatic local downloads or global install are
-performed. `pre-commit install` remains developer onboarding; CI enforces checks.
+The generic pre-commit configuration includes shared staged scanning and a manual
+scanner preparation hook. New Go starters provide `make setup`, which installs
+pre-commit 4.3.0 in an ignored project-local .venv, registers hooks, and prepares
+Gitleaks automatically. The shared scanner downloads a pinned release for
+macOS/Linux Intel/ARM, verifies archive and binary SHA256 values, and verifies the
+cached binary before every use. It never executes a Gitleaks binary from PATH.
+Downloads, checksum failures and unsupported systems fail closed. The first use
+needs network access; verified cached use works offline. CI remains mandatory.
 
-Tests use synthetic tokens in temporary repositories. They verify clean history,
-staged detections, historical detections after deletion, redaction, and rejection
-of candidate suppressions. Do not commit real credentials to test the scanner.
-
-Secret scanning is pattern detection, not proof that code is safe. Dependency
-vulnerability scanning (for example govulncheck), Terraform/IaC vulnerability
-scanning, and licensed GitHub security features remain follow-on decisions. This
-release does not claim those capabilities. Exceptions require a reviewed change
-to central tooling; there is no caller-controlled baseline/allowlist parameter.
+Existing repositories need a reviewed source upgrade to receive the new hook pin
+and setup files. Do not rerun initial bootstrap to overwrite an application.

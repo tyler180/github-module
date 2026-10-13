@@ -93,3 +93,16 @@ See [onboarding](docs/onboarding.md), [trusted policy boundary](docs/policy.md),
 [upgrades](docs/upgrades.md), and [pending live acceptance](docs/live-acceptance.md).
 
 See [secret scanning](docs/security-scanning.md) and [deployment gates](docs/deployment-gates.md). Repository apply remains blocked pending live authorization integration.
+
+## Developer setup in generated Go repositories
+
+The Go starter now provides `make setup`: Python 3.10+ creates a clone-local ignored
+`.venv`, installs pinned pre-commit, registers Git hooks, and prepares the pinned
+Gitleaks scanner automatically. Go remains a prerequisite. `make hooks` runs all
+checks without activating the environment. Use an approved hook revision containing
+`secret-scan-setup`; the example pins the reviewed shared scanner change.
+
+Existing application repositories require a reviewed source/configuration upgrade.
+Terraform does not own these setup files, and initial bootstrap must not overwrite
+an application. The platform's exact starter/hook pins must be promoted separately
+after review before automatic creation uses this starter revision.

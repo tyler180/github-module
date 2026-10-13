@@ -9,11 +9,13 @@ python3 scripts/render-template.py \
   --destination /tmp/github-go-pilot \
   --code-owner tyler180 \
   --workflow-ref v2.2.0-rc.1 \
-  --hook-ref v2.2.0-rc.1 \
+  --hook-ref b1a82505188fad2b6bca6c035c40b83c49bfc73f \
   --go-version 1.26.5 \
   --go-module github.com/tyler180/github-go-pilot
 cd /tmp/github-go-pilot
 bash scripts/validate.sh
+# After these files are committed to a real Git clone:
+make setup
 ```
 
 The renderer creates the complete module, program, tests, validation script,

@@ -68,13 +68,19 @@ Go formatting, vet and tests plus repository hygiene and redacted secret scannin
 The aggregate check succeeds only when all validation jobs succeed. Observe the
 actual check name from a PR before configuring required checks.
 
-Optional local hooks require pre-commit and Gitleaks 8.30.1 on PATH:
+Install local hooks with Python 3.10+ and the Go toolchain already available:
 
 ```sh
-pre-commit install
-pre-commit run --all-files
+make setup
+make hooks
 ```
 
 To materialize this pilot with your own module path and code owner, follow
 [BOOTSTRAP.md](BOOTSTRAP.md). Repository provisioning and later protection are
 separate from these source files; Terraform does not manage the Go code.
+
+`make setup` creates an ignored `.venv`, installs pre-commit 4.3.0 there, registers
+the Git hooks, and prepares checksum-pinned Gitleaks 8.30.1 in a user cache.
+No global pre-commit/Gitleaks install or PATH change is required. The first setup
+needs network access; subsequent scanner runs reuse the verified cache. Repeat
+setup for each clone. macOS/Linux arm64 and x86_64 are supported.
