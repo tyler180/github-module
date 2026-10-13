@@ -6,18 +6,18 @@ No Terraform apply, GitHub mutation, deployment enablement, publish, or push occ
 |---|---|
 | Terraform fmt -check -recursive | PASS (module, examples, tests, lockfile) |
 | Provider installation | PASS for module and all four consuming examples using local mirror of official 6.13.0 darwin_arm64 archive; SHA256 verified against published sums |
-| Module Terraform validate | BLOCKED: provider RPC cannot bind its local Unix socket in this sandbox |
-| Module mocked Terraform tests | BLOCKED at schema loading; 0 tests executed, not a test pass |
-| Consuming-root validate/mocked tests | BLOCKED by the same RPC restriction; 0 stage tests executed |
-| Other examples' provider validation | NOT EXECUTED after confirming the shared provider RPC restriction; initialization succeeded |
-| Policy fixtures | PASS: 43 standard-library tests |
+| Module Terraform validate | PASS after authorized credential-free execution outside the socket restriction |
+| Module mocked Terraform tests | PASS: 11 plan-only mocked tests |
+| Consuming-root validate/mocked tests | PASS: all consuming roots validate; 3 mocked stage tests |
+| Other examples' provider validation | PASS: minimal, adoption, template and consuming-root configurations |
+| Policy fixtures | PASS: 48 standard-library tests (including policy regression fixes) |
 | Receipt/isolation fixtures | PASS: 10 tests |
 | Shared hook fixtures | PASS: 4 tests |
 | Template materialization fixtures | PASS: 6 tests |
 | Actionlint 1.7.12 | PASS: 5 new shared workflows, 2 existing plan/deploy workflows, 2 rendered starter/pilot callers |
 | Native Terraform JSON smoke | PASS: built-in-only credential-free terraform_data fixture validated/planned; exact binary/JSON/snapshot receipt evaluated and rechecked; no apply |
 | Sibling patch | PASS: git apply --check and apply to isolated temporary copy; original plan/deploy workflow bytes preserved |
-| Real github-workflows checkout | UNCHANGED: writes rejected because it is outside writable workspace roots |
+| Real github-workflows checkout | Shared additions and deployment gates now applied locally; no push |
 | Live account, import, enforcement, credentials/backend, collector/deployment gates | PENDING |
 
 Terraform 1.15.8 is installed locally. Module minimum 1.7 supports mocks and removed
@@ -44,3 +44,46 @@ an accepted deployment record. All receipts explicitly deny deployment authoriza
 The staged sibling patch is integrations/github-workflows/local-additions.patch.
 It adds new reusable tooling and appends documentation; existing workflow files
 are not changed. Live trust/collector integration is documented but not enabled.
+
+Policy regression follow-up: 48 policy, 10 receipt, 4 hygiene, and 6 template
+tests pass (68 total). The revised regression suite fails against the pre-fix
+policy implementation. Both policy copies match, and the regenerated original
+installation patch passes git apply --check against the committed sibling
+baseline. No deployment integration or Terraform-provider execution is claimed.
+
+## Validation, scanner, and gate follow-up
+
+Provider startup succeeded outside the sandbox: module and all four examples
+validate; all 14 mocked Terraform tests pass. Added four real Gitleaks tests and
+eight deployment-workflow tests. The latter exercise the actual apply expression,
+fixture authorization rejection, required dependency graph, manual runs, missing
+trusted revisions, and inventory-policy disablement. Shared committed histories
+scan clean. No live apply or deployment authorization was attempted.
+
+The sibling checkout is now modified locally, including terraform-deploy.yml.
+The prior unchanged-checkout/workflow statements describe the initial delivery
+only. Deployment remains explicitly blocked for repository policy consumers.
+
+Final follow-up: complete local validation passes (14 Terraform and 80 Python
+tests), including workflow linting. Original install patch applies cleanly to
+the committed baseline and yields the current deployment workflow. No live
+repository authorization is claimed.
+
+## Credential integration follow-up
+
+Passed 11 deployment workflow tests and 50 policy tests; deployment workflow
+passes actionlint. Tests include empty planning/apply credentials, production
+secret isolation, and omitted rulesets before protection versus mandatory rulesets
+at protected stages. These results do not verify OIDC, token permissions, record
+storage isolation, or authorize a live deployment.
+
+## Create-stage implementation and access preflight
+
+Passed 10 live-adapter unit tests, 50 policy tests and 11 existing deployment
+workflow tests. New reusable deployment and access workflows and the standalone
+access caller pass actionlint. Regression coverage includes later-stage rejection,
+provisioners, unrecorded adoption, service failures, environment restrictions and
+changed saved-plan rejection before record advancement.
+
+Live OIDC and S3 probe testing is pending the access preflight PR's merge and
+production approval. No Terraform apply or accepted-record write was performed.

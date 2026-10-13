@@ -3,3 +3,4 @@ repos:
     rev: '{{HOOK_SHA}}'
     hooks:
       - id: repository-hygiene
+      - id: secret-scan

@@ -17,8 +17,8 @@ flowchart TD
 
 No organization policy is managed by this module. No workflow executes Terraform
 from the trusted policy job. Candidate Terraform validation is unprivileged and
-separate from credentialed infrastructure planning. Existing deployment workflows
-remain untouched. No backend, credential, record writer, live collector, or active
+separate from credentialed infrastructure planning. The deployment workflow now connects isolated policy gates but blocks live
+repository authorization. No backend, credential, record writer, live collector, or active
 caller is created by this local implementation.
 
 Functional increments: core/adoption; optional access/actions/rules; root staging;

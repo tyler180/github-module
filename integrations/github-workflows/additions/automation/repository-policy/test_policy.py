@@ -93,6 +93,30 @@ def fixture(old_stage="verify", stage="protect"):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_unprotected_stage_may_omit_ruleset(self):
+        args = fixture("create", "create")
+        plan = args[-1]
+        plan['resource_changes'] = [c for c in plan['resource_changes'] if c['type'] != 'github_repository_ruleset']
+        resources = plan['planned_values']['root_module']['child_modules'][0]['resources']
+        resources[:] = [r for r in resources if r['type'] != 'github_repository_ruleset']
+        policy.evaluate(*args, NOW)
+
+    def test_protected_stage_cannot_omit_ruleset(self):
+        args = fixture()
+        plan = args[-1]
+        plan['resource_changes'] = [c for c in plan['resource_changes'] if c['type'] != 'github_repository_ruleset']
+        resources = plan['planned_values']['root_module']['child_modules'][0]['resources']
+        resources[:] = [r for r in resources if r['type'] != 'github_repository_ruleset']
+        with self.assertRaisesRegex(policy.PolicyError, 'Protected stages require a ruleset'):
+            policy.evaluate(*args, NOW)
+
+    def test_existing_repository_computed_unknown_not_exempted(self):
+        args = fixture('create','create')
+        change = next(c for c in args[-1]['resource_changes'] if c['type']=='github_repository')
+        change['change']['after_unknown'] = {'web_commit_signoff_required':True}
+        with self.assertRaisesRegex(policy.PolicyError, 'Unknown critical'):
+            policy.evaluate(*args,NOW)
+
     def assert_rejected(self, mutate, old="verify", stage="protect"):
         args = fixture(old, stage)
         mutate(*args)
@@ -253,7 +277,7 @@ class PolicyTests(unittest.TestCase):
         repo["required_checks"]["new-check"] = {}
         observed = args[3]["repositories"]["pilot"]
         observed["tooling_digest"] = policy.tooling_digest(repo)
-        observed["effective_required_checks"] = copy.deepcopy(repo["required_checks"])
+        observed["effective_required_checks"] = copy.deepcopy(args[0]["repositories"]["pilot"]["required_checks"])
         observed["checks"].append({**observed["checks"][0], "context": "new-check", "run_id": 2})
         rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
         rs["rules"][0]["required_status_checks"][0]["required_check"].append({"context": "new-check", "integration_id": 0})
@@ -270,12 +294,63 @@ class PolicyTests(unittest.TestCase):
         repo["required_checks"] = {"new-check": {}}
         observed = args[3]["repositories"]["pilot"]
         observed["tooling_digest"] = policy.tooling_digest(repo)
-        observed["effective_required_checks"] = {"new-check": {}}
+        observed["effective_required_checks"] = copy.deepcopy(base_repo["required_checks"])
         observed["checks"][0]["context"] = "new-check"
         rs = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][1]["values"]
         rs["rules"][0]["required_status_checks"][0]["required_check"][0]["context"] = "new-check"
         args[4]["resource_changes"][1]["change"]["after"] = copy.deepcopy(rs)
         policy.evaluate(*args, NOW)
+
+
+    def test_live_checks_must_match_accepted_baseline(self):
+        self.assert_rejected(lambda b, r, c, e, p: e["repositories"]["pilot"].update(
+            effective_required_checks={"unapproved-check": {}}), "grant", "grant")
+
+    def test_changed_integration_is_not_overlap(self):
+        args = fixture("grant", "grant")
+        repo = args[2]["repositories"]["pilot"]
+        repo["required_checks"]["platform-ci"] = {"integration_id": 99}
+        observed = args[3]["repositories"]["pilot"]
+        observed["tooling_digest"] = policy.tooling_digest(repo)
+        observed["checks"][0]["integration_id"] = 99
+        with self.assertRaisesRegex(policy.PolicyError, "verified overlap"):
+            policy.validate_transition(*args[:4], NOW)
+
+    def allowlist_fixture(self, patterns, planned_patterns):
+        args = fixture()
+        selected = {"github_owned_allowed": False, "verified_allowed": False,
+                    "patterns_allowed": patterns}
+        args[2]["repositories"]["pilot"]["actions_policy"] = {
+            "enabled": True, "allowed_actions": "selected", "sha_pinning_required": True,
+            "selected": selected}
+        value = {"repository": "offline-fixture", "enabled": True,
+                 "allowed_actions": "selected", "sha_pinning_required": True,
+                 "allowed_actions_config": [{**selected, "patterns_allowed": planned_patterns}]}
+        item = {"address": 'module.repositories["pilot"].github_actions_repository_permissions.this["managed"]',
+                "module_address": 'module.repositories["pilot"]', "mode": "managed",
+                "type": "github_actions_repository_permissions",
+                "provider_name": "registry.terraform.io/integrations/github", "values": value}
+        args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"].append(item)
+        args[4]["resource_changes"].append({**item, "change": {
+            "actions": ["create"], "before": None, "after": copy.deepcopy(value), "after_unknown": {}}})
+        return args
+
+    def test_allowlist_order_is_not_significant(self):
+        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "z/*"])
+        policy.validate_plan(args[2], args[0], args[1], args[4])
+
+    def test_allowlist_changed_pattern_rejected(self):
+        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "other/*"])
+        with self.assertRaisesRegex(policy.PolicyError, "allowlist mismatch"):
+            policy.validate_plan(args[2], args[0], args[1], args[4])
+
+    def test_allowlist_changed_boolean_rejected(self):
+        args = self.allowlist_fixture(["z/*", "a/*"], ["a/*", "z/*"])
+        value = args[4]["planned_values"]["root_module"]["child_modules"][0]["resources"][-1]["values"]
+        value["allowed_actions_config"][0]["verified_allowed"] = True
+        args[4]["resource_changes"][-1]["change"]["after"] = copy.deepcopy(value)
+        with self.assertRaisesRegex(policy.PolicyError, "allowlist mismatch"):
+            policy.validate_plan(args[2], args[0], args[1], args[4])
 
     def test_snapshot_binding(self):
         with tempfile.TemporaryDirectory() as directory:

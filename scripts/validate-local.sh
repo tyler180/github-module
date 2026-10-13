@@ -8,17 +8,17 @@ terraform fmt -check -recursive
 terraform init -backend=false -input=false
 terraform validate -no-color
 terraform test -no-color
-for directory in examples/minimal examples/adoption examples/template examples/consuming-root; do
+for directory in examples/minimal examples/adoption examples/template examples/consuming-root examples/go-pilot/terraform; do
   terraform -chdir="$directory" init -backend=false -input=false
   terraform -chdir="$directory" validate -no-color
 done
 terraform -chdir=examples/consuming-root test -no-color
-for suite in test_policy test_receipt test_hygiene; do
+for suite in test_policy test_receipt test_hygiene test_secret_scan test_deployment_workflow; do
   python3 -I "integrations/github-workflows/additions/automation/repository-policy/$suite.py"
 done
 python3 -I tests/test_template.py
 if command -v actionlint >/dev/null 2>&1; then
-  actionlint integrations/github-workflows/additions/.github/workflows/*.yml
+  actionlint integrations/github-workflows/additions/.github/workflows/*.yml integrations/github-workflows/updates/.github/workflows/*.yml
 else
   echo "actionlint is required for complete workflow validation" >&2
   exit 1

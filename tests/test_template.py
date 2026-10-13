@@ -33,6 +33,25 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("go-validate.yml@" + "a"*40, ci)
         self.assertIn("go-version: '1.25.0'", ci)
 
+    def test_complete_go_starter_with_release_refs(self):
+        args = self.args.copy()
+        args[args.index("--workflow-sha") + 1] = "v2.2.0-rc.1"
+        args[args.index("--hook-sha") + 1] = "v2.2.0-rc.1"
+        result = self.run_renderer(["--go-version", "1.26.5", "--go-module", "github.com/fixture-owner/pilot"], args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("module github.com/fixture-owner/pilot", (self.destination / "go.mod").read_text())
+        for name in ("main.go", "main_test.go", "scripts/validate.sh", "Makefile", "BOOTSTRAP.md"):
+            self.assertTrue((self.destination / name).is_file(), name)
+        self.assertTrue((self.destination / "scripts/validate.sh").stat().st_mode & 0o111)
+        self.assertFalse((self.destination / "terraform").exists())
+        self.assertEqual((self.destination / ".github/CODEOWNERS").read_text(), "* @fixture-owner/platform\n")
+        self.assertFalse(any(p.name.endswith(".in") for p in self.destination.rglob("*")))
+
+    def test_rejects_go_module_injection(self):
+        result = self.run_renderer(["--go-version", "1.26.5", "--go-module", "example.com/pilot\ngo 1.0"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.destination.exists())
+
     def test_refuses_overwrite(self):
         self.destination.mkdir()
         sentinel = self.destination / "existing"
