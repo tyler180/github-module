@@ -1,0 +1,58 @@
+# Go + AWS Terraform setup
+
+These additive callers use Terraform {{TERRAFORM_VERSION}} in
+`{{TERRAFORM_DIRECTORY}}` and shared workflow revision
+`{{TERRAFORM_WORKFLOW_SHA}}`. They do not create Terraform resources or replace
+application CI, source code, CODEOWNERS, hooks, or existing Terraform.
+
+Both callers are disabled until explicitly configured. Deployment is manual only.
+There are no path filters: changes to Go source or Dockerfile can change Terraform
+build inputs even when no `.tf` file changes. Fork PR plans are skipped.
+
+## Configure before enabling
+
+1. Add or retain your Terraform configuration, remote backend with locking, and
+   committed `.terraform.lock.hcl`. Pin provider/module versions. Keep credentials
+   and state out of Git. Do not use an empty scaffold as a deployment configuration.
+2. Bootstrap GitHub OIDC and plan/apply roles separately. Match the actual repo PR,
+   default-branch, and environment subjects. Give the plan role backend state-read
+   and lock permissions; give apply state-write and scoped resource permissions.
+3. Create the GitHub deployment environment with default-branch restrictions and
+   required reviewers supported by your account. Merely naming an environment
+   does not add approval protection.
+4. Set repository Actions variables:
+
+   | Variable | Value |
+   | --- | --- |
+   | `TERRAFORM_PLAN_ROLE_ARN` | Plan IAM role ARN |
+   | `TERRAFORM_APPLY_ROLE_ARN` | Apply IAM role ARN |
+   | `TERRAFORM_STATE_ID` | Unique state identifier within this repo |
+   | `TERRAFORM_ENVIRONMENT` | Protected deployment environment name |
+   | `TERRAFORM_AWS_REGION` | AWS region; defaults to `us-west-2` |
+   | `TERRAFORM_ENABLED` | `true` only after setup, to enable PR plans |
+   | `TERRAFORM_DEPLOY_ENABLED` | `true` only when ready for manual deployment |
+
+5. Run local fmt/validate, then review a real PR plan. Run the manual deployment
+   from the default branch and review its fresh saved plan before environment
+   approval. No apply is needed to test source rendering or YAML validation.
+
+## Terraform-driven Docker builds
+
+If Terraform builds/pushes an image, the plan may execute external build steps.
+Check whether the modules require ECR writes during planning; a purely read-only
+plan role may be insufficient. Shared deployment checks out the triggering commit
+in both jobs, restoring the Terraform plan bundle for apply, so sibling Go files
+and Dockerfile remain available. The runner must have a working Docker daemon and
+the required target-platform build support. For local amd64 builds on the shared
+Ubuntu runner, verify `docker info` and the actual module build during the first
+reviewed plan. Do not add backend/provider secrets to workflow files.
+
+## Existing repositories
+
+Render with `--workflows-only` into a new staging directory, inspect these three
+files, and add them through a PR. If either workflow filename or this guide already
+exists, reconcile it manually instead of overwriting it. Keep existing Go CI and
+Terraform intact. This installs source callers; importing repository settings into
+`github-infra` is a separate adoption operation described in its adoption guide.
+
+See the shared `github-workflows/TERRAFORM.md` for the complete caller contract.

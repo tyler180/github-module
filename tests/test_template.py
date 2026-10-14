@@ -96,6 +96,54 @@ class TemplateTests(unittest.TestCase):
     def test_requires_explicit_go_version(self):
         self.assertNotEqual(self.run_renderer(["--go-version", "stable"]).returncode, 0)
 
+    def test_go_terraform_starter_is_disabled_and_manual(self):
+        result = self.run_renderer(["--go-version", "1.26.5", "--terraform-version", "1.15.0",
+                                    "--terraform-workflow-ref", "c" * 40])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ci = (self.destination / ".github/workflows/ci.yml").read_text()
+        self.assertIn("go-validate.yml", ci)
+        deploy = (self.destination / ".github/workflows/terraform-deploy.yml").read_text()
+        self.assertIn("workflow_dispatch:", deploy)
+        self.assertNotIn("  push:", deploy)
+        self.assertIn("vars.TERRAFORM_DEPLOY_ENABLED == 'true'", deploy)
+        self.assertIn("@" + "c" * 40, deploy)
+        self.assertNotIn("{{TERRAFORM_", deploy)
+        self.assertIn("*.tfstate", (self.destination / ".gitignore").read_text())
+
+    def test_workflows_only_does_not_copy_application_or_go_ci(self):
+        args = [sys.executable, "-I", str(ROOT / "scripts/render-template.py"),
+                "--destination", str(self.destination), "--workflows-only",
+                "--terraform-version", "1.15.0", "--terraform-workflow-ref", "c" * 40]
+        result = self.run_renderer(args=args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        files = {str(p.relative_to(self.destination)) for p in self.destination.rglob("*") if p.is_file()}
+        self.assertEqual(files, {".github/workflows/terraform-plan.yml", ".github/workflows/terraform-deploy.yml", "TERRAFORM-STARTER.md"})
+        plan = (self.destination / ".github/workflows/terraform-plan.yml").read_text()
+        self.assertIn("vars.TERRAFORM_ENABLED == 'true'", plan)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", plan)
+        self.assertNotIn("paths:", plan)
+
+    def test_terraform_rejects_unsafe_configuration_without_writes(self):
+        for field, value in [("--terraform-version", "latest"), ("--terraform-workflow-ref", "main"),
+                             ("--terraform-directory", "../terraform"), ("--terraform-directory", "terraform\nfoo")]:
+            args = ["--workflows-only", "--terraform-version", "1.15.0", "--terraform-workflow-ref", "c" * 40]
+            if field in args:
+                args[args.index(field) + 1] = value
+            else:
+                args.extend([field, value])
+            with self.subTest(field=field, value=value):
+                self.assertNotEqual(self.run_renderer(args).returncode, 0)
+                self.assertFalse(self.destination.exists())
+
+    def test_workflows_only_refuses_existing_destination(self):
+        self.destination.mkdir()
+        sentinel = self.destination / "main.go"
+        sentinel.write_text("existing application")
+        result = self.run_renderer(["--workflows-only", "--terraform-version", "1.15.0", "--terraform-workflow-ref", "c" * 40])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sentinel.read_text(), "existing application")
+        self.assertFalse((self.destination / ".github").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

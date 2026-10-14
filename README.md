@@ -106,3 +106,8 @@ Existing application repositories require a reviewed source/configuration upgrad
 Terraform does not own these setup files, and initial bootstrap must not overwrite
 an application. The platform's exact starter/hook pins must be promoted separately
 after review before automatic creation uses this starter revision.
+
+## Go + Terraform starter
+
+See [opt-in Go + Terraform starter](docs/go-terraform.md) for new repositories and
+additive workflow overlays for existing application repositories.
