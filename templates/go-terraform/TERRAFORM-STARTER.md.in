@@ -2,7 +2,7 @@
 
 These additive callers use Terraform {{TERRAFORM_VERSION}} in
 `{{TERRAFORM_DIRECTORY}}` and shared workflow revision
-`{{TERRAFORM_WORKFLOW_SHA}}`. They do not create Terraform resources or replace
+`{{TERRAFORM_WORKFLOW_REF}}`. They do not create Terraform resources or replace
 application CI, source code, CODEOWNERS, hooks, or existing Terraform.
 
 Both callers are disabled until explicitly configured. Deployment is manual only.
