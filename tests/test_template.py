@@ -110,6 +110,13 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn("{{TERRAFORM_", deploy)
         self.assertIn("*.tfstate", (self.destination / ".gitignore").read_text())
 
+    def test_terraform_release_version_is_preserved(self):
+        result = self.run_renderer(["--workflows-only", "--terraform-version", "1.15.0",
+                                    "--terraform-workflow-ref", "v2.3.0-rc.3"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ("terraform-plan.yml", "terraform-deploy.yml"):
+            self.assertIn("@v2.3.0-rc.3", (self.destination / ".github/workflows" / name).read_text())
+
     def test_workflows_only_does_not_copy_application_or_go_ci(self):
         args = [sys.executable, "-I", str(ROOT / "scripts/render-template.py"),
                 "--destination", str(self.destination), "--workflows-only",
@@ -124,7 +131,7 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn("paths:", plan)
 
     def test_terraform_rejects_unsafe_configuration_without_writes(self):
-        for field, value in [("--terraform-version", "latest"), ("--terraform-workflow-ref", "main"),
+        for field, value in [("--terraform-version", "latest"), ("--terraform-workflow-ref", "main"), ("--terraform-workflow-ref", "v2"),
                              ("--terraform-directory", "../terraform"), ("--terraform-directory", "terraform\nfoo")]:
             args = ["--workflows-only", "--terraform-version", "1.15.0", "--terraform-workflow-ref", "c" * 40]
             if field in args:

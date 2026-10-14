@@ -9,12 +9,12 @@ python3 scripts/render-template.py \
   --workflow-ref v2.2.0-rc.1 --hook-ref v2.2.0-rc.1 \
   --go-version 1.26.5 --go-module github.com/tyler180/new-repo \
   --terraform-version 1.15.0 \
-  --terraform-workflow-ref af06ebbdfe069ce16beee12d86c9ee03591592d7
+  --terraform-workflow-ref v2.3.0-rc.3
 ```
 
 The Terraform revision above contains the existing shared plan/deploy caller
 contracts. Independently review the revision you choose. The renderer accepts an
-explicit patch Terraform version, a full workflow SHA, and an optional relative
+explicit patch Terraform version, an exact immutable workflow release version, and an optional relative
 `--terraform-directory` (default `terraform`). It adds two disabled AWS workflow
 callers and a setup guide alongside the existing Go starter, plus Terraform runtime
 and state ignore patterns. It does not guess cloud resources or backend configuration.
@@ -26,7 +26,7 @@ For an existing repo, stage only the additive files:
 python3 scripts/render-template.py \
   --destination /tmp/existing-go-terraform-overlay --workflows-only \
   --terraform-version 1.15.0 \
-  --terraform-workflow-ref af06ebbdfe069ce16beee12d86c9ee03591592d7
+  --terraform-workflow-ref v2.3.0-rc.3
 ```
 
 This needs no Go version, module, owners or hook selection because it never renders

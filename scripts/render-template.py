@@ -14,20 +14,20 @@ def main():
     parser.add_argument("--go-version", help="optional Go pilot instead of the generic caller")
     parser.add_argument("--go-module", default="example.com/github-go-pilot", help="Go module path for a rendered Go pilot")
     parser.add_argument("--terraform-version", help="opt in to AWS Terraform callers; explicit patch version")
-    parser.add_argument("--terraform-workflow-ref", help="reviewed full SHA for shared plan/deploy workflows")
+    parser.add_argument("--terraform-workflow-ref", help="exact immutable release version or full SHA for shared workflows")
     parser.add_argument("--terraform-directory", default="terraform")
     parser.add_argument("--workflows-only", action="store_true", help="render additive Terraform workflow files for an existing repo into a new staging directory")
     args = parser.parse_args()
+    immutable_ref = r"(?:[0-9a-f]{40}|v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?)"
     if args.terraform_version:
         if (not args.workflows_only and not args.go_version) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.terraform_version):
             parser.error("Terraform starter requires --go-version and an explicit Terraform patch version")
-        if not re.fullmatch(r"[0-9a-f]{40}", args.terraform_workflow_ref or ""):
-            parser.error("Terraform workflows require a reviewed full commit SHA")
+        if not re.fullmatch(immutable_ref, args.terraform_workflow_ref or ""):
+            parser.error("Terraform workflows require an exact immutable release version or full SHA")
         if not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", args.terraform_directory):
             parser.error("Terraform directory must be a relative directory without traversal")
     elif args.workflows_only or args.terraform_workflow_ref:
         parser.error("--workflows-only and --terraform-workflow-ref require --terraform-version")
-    immutable_ref = r"(?:[0-9a-f]{40}|v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?)"
     if not args.workflows_only and not all(re.fullmatch(immutable_ref, ref or "") for ref in (args.workflow_ref, args.hook_ref)):
         parser.error("refs must be full commit SHAs or exact immutable release versions")
     if not args.workflows_only and not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)?", args.code_owner or ""):
@@ -94,7 +94,7 @@ def main():
 
 def render_terraform(root, destination, args):
     replacements = {"TERRAFORM_VERSION": args.terraform_version,
-                    "TERRAFORM_WORKFLOW_SHA": args.terraform_workflow_ref,
+                    "TERRAFORM_WORKFLOW_REF": args.terraform_workflow_ref,
                     "TERRAFORM_DIRECTORY": args.terraform_directory}
     source = root / "templates/go-terraform"
     for path in source.rglob("*"):
