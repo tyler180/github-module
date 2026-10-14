@@ -42,7 +42,6 @@ Plans skip forks; deployment accepts only manual runs on the default branch.
 The environment must be protected before enabling deployment.
 
 `github-infra` can store the opt-in in each entry's `terraform_starter` object and
-render it with `scripts/render-terraform-starter.py`. The published automatic Go
-bootstrap remains separate; it does not consume this new metadata until a reviewed
-shared-bootstrap release implements it. Existing repo adoption requires import and
+render it with `scripts/render-terraform-starter.py`. The published Go bootstrap is followed by the shared additive Terraform starter
+installer, which consumes this metadata and opens a source PR for review. Existing repo adoption requires import and
 a no-change plan using observed settings; adding source callers does not import it.
