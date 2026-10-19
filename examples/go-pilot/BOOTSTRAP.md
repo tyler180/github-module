@@ -8,8 +8,8 @@ generate into a new destination:
 python3 scripts/render-template.py \
   --destination /tmp/github-go-pilot \
   --code-owner tyler180 \
-  --workflow-ref v2.2.0-rc.1 \
-  --hook-ref b1a82505188fad2b6bca6c035c40b83c49bfc73f \
+  --workflow-ref v2.3.0-rc.10 \
+  --hook-ref v2.3.0-rc.10 \
   --go-version 1.26.5 \
   --go-module github.com/tyler180/github-go-pilot
 cd /tmp/github-go-pilot
@@ -58,3 +58,12 @@ Use your actual owner and repository name in both the renderer's `--go-module`
 and clone URL. The renderer deliberately excludes the Terraform provisioning
 folder from the generated application starter. Review and merge the bootstrap
 PR after CI succeeds.
+
+New rendered starters put their command and example tests under
+`cmd/<module-name>/`, with the entry point recorded in `.go-main.mk`.
+`make run` reads that file; `make build` and validation build every package.
+The source example in this directory remains runnable from its root.
+
+For an imported application, use the shared `github-workflows/scripts/configure-go.py`
+onboarding tool to discover commands, optionally select among them with AI,
+and propose configuration without replacing application source.

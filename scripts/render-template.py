@@ -71,6 +71,9 @@ def main():
                 continue
             if str(relative) in (".github/workflows/ci.yml", ".pre-commit-config.yaml", ".github/CODEOWNERS"):
                 continue
+            if str(relative) in ("main.go", "main_test.go"):
+                command = args.go_module.split("/")[-1]
+                relative = Path("cmd") / command / relative
             target = destination / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             content = path.read_text()
@@ -78,10 +81,13 @@ def main():
                 start = content.index("## Create the repository")
                 end = content.index("## Run the Go starter")
                 content = content[:start] + "Repository provisioning is complete before this starter is added. See BOOTSTRAP.md for source bootstrap instructions.\n\n" + content[end:]
+                content = content.replace("go run .", "go run ./cmd/" + args.go_module.split("/")[-1])
             if str(relative) == "go.mod":
                 content = "module " + args.go_module + "\n\ngo " + ".".join(args.go_version.split(".")[:2]) + ".0\n"
             target.write_text(content)
             target.chmod(path.stat().st_mode & 0o777)
+        (destination / ".go-main.mk").write_text(
+            "# Generated starter command; review and commit.\nGO_MAIN := ./cmd/" + args.go_module.split("/")[-1] + "\n")
         (destination / ".github/CODEOWNERS").write_text("* @" + args.code_owner + "\n")
         with (destination / ".pre-commit-config.yaml").open("a") as hooks:
             hooks.write("  - repo: local\n    hooks:\n      - id: go-validation\n        name: Go formatting, vet and race tests\n        entry: bash scripts/validate.sh\n        language: system\n        pass_filenames: false\n        always_run: true\n")

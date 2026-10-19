@@ -6,7 +6,7 @@ Use the existing Go starter with these additional arguments:
 python3 scripts/render-template.py \
   --destination /tmp/new-go-terraform-starter \
   --code-owner tyler180 \
-  --workflow-ref v2.2.0-rc.1 --hook-ref v2.2.0-rc.1 \
+  --workflow-ref v2.3.0-rc.10 --hook-ref v2.3.0-rc.10 \
   --go-version 1.26.5 --go-module github.com/tyler180/new-repo \
   --terraform-version 1.15.0 \
   --terraform-workflow-ref v2.3.0-rc.3
