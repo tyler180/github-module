@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/tyler180/github-workflows
-    rev: b1a82505188fad2b6bca6c035c40b83c49bfc73f
+    rev: v2.3.0-rc.10
     hooks:
       - id: repository-hygiene
       - id: secret-scan
