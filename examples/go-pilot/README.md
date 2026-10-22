@@ -58,8 +58,8 @@ The first command prints `Hello, Go pilot!`; the second prints `Hello, Tyler!`.
 An empty or whitespace-only name produces `Hello, world!`.
 
 `make run`, `make test`, and `make check` provide the same local entry points.
-Validation checks formatting, runs `go vet`, and runs the repository's race-enabled
-tests. The program has no shared concurrent state; the race run is a smoke
+Validation checks formatting, runs `go vet`, runs the repository's race-enabled
+tests, and builds every package. The program has no shared concurrent state; the race run is a smoke
 check, not proof of concurrent behavior. No `go.sum` is needed without external
 module dependencies.
 

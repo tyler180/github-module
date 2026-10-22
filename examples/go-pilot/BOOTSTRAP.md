@@ -58,3 +58,12 @@ Use your actual owner and repository name in both the renderer's `--go-module`
 and clone URL. The renderer deliberately excludes the Terraform provisioning
 folder from the generated application starter. Review and merge the bootstrap
 PR after CI succeeds.
+
+New rendered starters put their command and example tests under
+`cmd/<module-name>/`, with the entry point recorded in `.go-main.mk`.
+`make run` reads that file; `make build` and validation build every package.
+The source example in this directory remains runnable from its root.
+
+For an imported application, use the shared `github-workflows/scripts/configure-go.py`
+onboarding tool to discover commands, optionally select among them with AI,
+and propose configuration without replacing application source.

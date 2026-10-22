@@ -41,11 +41,13 @@ class TemplateTests(unittest.TestCase):
         result = self.run_renderer(["--go-version", "1.26.5", "--go-module", "github.com/fixture-owner/pilot"], args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("module github.com/fixture-owner/pilot", (self.destination / "go.mod").read_text())
-        for name in ("main.go", "main_test.go", "scripts/validate.sh", "scripts/setup.sh", "Makefile", "BOOTSTRAP.md"):
+        for name in ("cmd/pilot/main.go", "cmd/pilot/main_test.go", ".go-main.mk", "scripts/validate.sh", "scripts/setup.sh", "Makefile", "BOOTSTRAP.md"):
             self.assertTrue((self.destination / name).is_file(), name)
         self.assertTrue((self.destination / "scripts/validate.sh").stat().st_mode & 0o111)
         self.assertTrue((self.destination / "scripts/setup.sh").stat().st_mode & 0o111)
         self.assertIn("setup:", (self.destination / "Makefile").read_text())
+        self.assertIn("GO_MAIN := ./cmd/pilot", (self.destination / ".go-main.mk").read_text())
+        self.assertFalse((self.destination / "main.go").exists())
         self.assertIn("/.venv/", (self.destination / ".gitignore").read_text())
         hooks = (self.destination / ".pre-commit-config.yaml").read_text()
         self.assertIn("secret-scan-setup", hooks)
